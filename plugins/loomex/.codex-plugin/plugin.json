@@ -1,0 +1,40 @@
+{
+  "name": "loomex",
+  "version": "0.1.3",
+  "description": "Run durable Loomex workflows against local workspaces from Codex.",
+  "author": {
+    "name": "Loomex"
+  },
+  "homepage": "https://github.com/loomex-app/runner",
+  "repository": "https://github.com/loomex-app/runner",
+  "keywords": [
+    "workflow",
+    "automation",
+    "local-workspace",
+    "human-in-the-loop"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Loomex",
+    "shortDescription": "Run durable workflows on local workspaces.",
+    "longDescription": "Browse and run Loomex workflows from Codex, operate on explicitly bound local workspaces, follow long-running executions, and answer human requests and approvals. The bundled adapter connects Codex to a durable per-user Loomex Runner service, while the Tauri app remains available as an alternative client.",
+    "developerName": "Loomex",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Local workspace",
+      "Long-running workflows",
+      "Human-in-the-loop"
+    ],
+    "brandColor": "#635BFF",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png",
+    "logoDark": "./assets/logo-dark.png",
+    "defaultPrompt": [
+      "Show my Loomex workflows.",
+      "Run a Loomex workflow in this workspace.",
+      "Show pending Loomex human requests."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}
