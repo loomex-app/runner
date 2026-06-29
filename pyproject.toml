@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loomex-runner"
+version = "0.1.0"
+description = "Local Loomex workflow runner for executing jobs against a user-owned workspace."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Loomex" }]
+dependencies = []
+
+[project.scripts]
+loomex-runner = "loomex_runner.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,164 @@
+[[permission]]
+identifier = "allow-app-launch"
+description = "Allows the mac app to launch and read shared Loomex CLI configuration."
+commands.allow = ["app_launch"]
+
+[[permission]]
+identifier = "allow-login-device-start"
+description = "Allows the mac app to start browser/device login."
+commands.allow = ["login_device_start"]
+
+[[permission]]
+identifier = "allow-login-device-complete"
+description = "Allows the mac app to complete browser/device login after user verification."
+commands.allow = ["login_device_complete"]
+
+[[permission]]
+identifier = "allow-login-cancel"
+description = "Allows the mac app to cancel local login UI state without storing credentials."
+commands.allow = ["login_cancel"]
+
+[[permission]]
+identifier = "allow-login-api-key"
+description = "Allows the mac app to exchange an API key and secret for a management credential."
+commands.allow = ["login_api_key"]
+
+[[permission]]
+identifier = "allow-login-workspace"
+description = "Allows the mac app to sign in with workspace email and password and bootstrap a runner credential."
+commands.allow = ["login_workspace"]
+
+[[permission]]
+identifier = "allow-organization-list"
+description = "Allows the mac app to list organizations visible to the authenticated user."
+commands.allow = ["organization_list"]
+
+[[permission]]
+identifier = "allow-project-list"
+description = "Allows the mac app to list projects for the selected organization."
+commands.allow = ["project_list"]
+
+[[permission]]
+identifier = "allow-project-select"
+description = "Allows the mac app to persist selected organization and project context."
+commands.allow = ["project_select"]
+
+[[permission]]
+identifier = "allow-workspace-pick-directory"
+description = "Allows the mac app to open the native directory picker and return the selected workspace path or an explicit cancel result."
+commands.allow = ["workspace_pick_directory"]
+
+[[permission]]
+identifier = "allow-workspace-file-list"
+description = "Allows the mac app to list files under the selected workspace for composer mentions."
+commands.allow = ["workspace_file_list"]
+
+[[permission]]
+identifier = "allow-workspace-bind"
+description = "Allows the mac app to bind a selected local workspace to a project."
+commands.allow = ["workspace_bind"]
+
+[[permission]]
+identifier = "allow-workspace-set"
+description = "Allows the mac app to persist a selected local workspace without project binding."
+commands.allow = ["workspace_set"]
+
+[[permission]]
+identifier = "allow-workspace-picker-cancel"
+description = "Allows the mac app to keep state stable when workspace selection is cancelled."
+commands.allow = ["workspace_picker_cancel"]
+
+[[permission]]
+identifier = "allow-workflow-list"
+description = "Allows the mac app to list runner-control workflows available to the authenticated runner."
+commands.allow = ["workflow_list"]
+
+[[permission]]
+identifier = "allow-workflow-run-chat"
+description = "Allows the mac app to start a runner-control workflow execution from a chat message."
+commands.allow = ["workflow_run_chat"]
+
+[[permission]]
+identifier = "allow-workflow-run-list"
+description = "Allows the mac app to list runner-control workflow executions for sidebar history."
+commands.allow = ["workflow_run_list"]
+
+[[permission]]
+identifier = "allow-workflow-run-detail"
+description = "Allows the mac app to read runner-control workflow execution status for chat polling."
+commands.allow = ["workflow_run_detail"]
+
+[[permission]]
+identifier = "allow-runner-status"
+description = "Allows the mac app to read runner status from the shared Rust core surface."
+commands.allow = ["runner_status"]
+
+[[permission]]
+identifier = "allow-runner-start"
+description = "Allows the mac app to start the shared runner core for the selected binding."
+commands.allow = ["runner_start"]
+
+[[permission]]
+identifier = "allow-runner-stop"
+description = "Allows the mac app to stop the shared runner core for the selected binding."
+commands.allow = ["runner_stop"]
+
+[[permission]]
+identifier = "allow-approval-list"
+description = "Allows the mac app to list pending local action approval dialogs."
+commands.allow = ["approval_list"]
+
+[[permission]]
+identifier = "allow-approval-decide"
+description = "Allows the mac app to send allow-once or deny decisions for local action approvals."
+commands.allow = ["approval_decide"]
+
+[[permission]]
+identifier = "allow-approval-expire"
+description = "Allows the mac app runtime to expire stale approval dialogs."
+commands.allow = ["approval_expire"]
+
+[[permission]]
+identifier = "allow-run-approval-cancel"
+description = "Allows the mac app runtime to cancel pending approvals for a cancelled run."
+commands.allow = ["run_approval_cancel"]
+
+[[permission]]
+identifier = "allow-live-logs"
+description = "Allows the mac app to read redacted local runner live logs."
+commands.allow = ["live_logs"]
+
+[[permission]]
+identifier = "allow-run-history"
+description = "Allows the mac app to read paginated local runner run history."
+commands.allow = ["run_history"]
+
+[[permission]]
+identifier = "allow-reconnect-status"
+description = "Allows the mac app to show reconnect and lifecycle status."
+commands.allow = ["reconnect_status"]
+
+[[permission]]
+identifier = "allow-notification-status"
+description = "Allows the mac app to expose approval notification permission state."
+commands.allow = ["notification_status"]
+
+[[permission]]
+identifier = "allow-support-bundle-export"
+description = "Allows the mac app to export a redacted support diagnostics bundle."
+commands.allow = ["support_bundle_export"]
+
+[[permission]]
+identifier = "allow-open-in-loomex-url"
+description = "Allows the mac app to build the Loomex web URL for the selected project or run."
+commands.allow = ["open_in_loomex_url"]
+
+[[permission]]
+identifier = "allow-logout"
+description = "Allows the mac app to clear local credentials and selected binding state."
+commands.allow = ["logout"]
+
+[[permission]]
+identifier = "allow-app-quit"
+description = "Allows the mac app to quit after shared runner lifecycle checks."
+commands.allow = ["app_quit"]
