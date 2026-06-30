@@ -8851,6 +8851,24 @@ mod tests {
                 .ok_or_else(|| loomex_core::CoreError::new("MANAGEMENT_AUTH_FAILED", "invalid"))
         }
 
+        fn login_workspace(
+            &mut self,
+            _email: &str,
+            _password: &str,
+        ) -> loomex_core::CoreResult<loomex_core::WorkspaceLoginResult> {
+            Err(loomex_core::CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+        }
+
+        fn bootstrap_runner_with_workspace_token(
+            &mut self,
+            _workspace_token: &str,
+            _organization_id: &str,
+            _project_id: Option<&str>,
+            _workspace_root: Option<&str>,
+        ) -> loomex_core::CoreResult<loomex_core::ApiKeyExchangeResult> {
+            Err(loomex_core::CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+        }
+
         fn list_organizations(
             &mut self,
             _credential: &ManagementCredential,
@@ -8980,6 +8998,25 @@ mod tests {
             _workflow_id: &str,
             _inputs: Value,
             _session_id: Option<&str>,
+        ) -> loomex_core::CoreResult<loomex_core::RunnerWorkflowExecutionResponse> {
+            Err(loomex_core::CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+        }
+
+        fn list_runner_workflow_executions(
+            &mut self,
+            _credential: &ManagementCredential,
+            _workflow_id: &str,
+            _limit: usize,
+        ) -> loomex_core::CoreResult<loomex_core::RunnerWorkflowExecutionListResponse> {
+            Ok(loomex_core::RunnerWorkflowExecutionListResponse {
+                executions: Vec::new(),
+            })
+        }
+
+        fn get_runner_workflow_execution(
+            &mut self,
+            _credential: &ManagementCredential,
+            _execution_id: &str,
         ) -> loomex_core::CoreResult<loomex_core::RunnerWorkflowExecutionResponse> {
             Err(loomex_core::CoreError::new("TEST_UNIMPLEMENTED", "unused"))
         }
