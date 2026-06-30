@@ -55,6 +55,7 @@
 
       button,
       input,
+      select,
       textarea {
         font: inherit;
       }
@@ -81,6 +82,7 @@
 
       button:focus-visible,
       input:focus-visible,
+      select:focus-visible,
       textarea:focus-visible {
         outline: 2px solid var(--cyan);
         outline-offset: 2px;
@@ -132,6 +134,7 @@
       }
 
       input,
+      select,
       textarea {
         width: 100%;
         border: 1px solid var(--border);
@@ -140,7 +143,8 @@
         color: var(--text);
       }
 
-      input {
+      input,
+      select {
         min-height: 40px;
         padding: 8px 10px;
       }
@@ -669,8 +673,10 @@
 
       .run-dot.running,
       .run-dot.queued,
+      .run-dot.waiting,
       .status-dot.running,
       .status-dot.queued,
+      .status-dot.waiting,
       .status-dot.started {
         background: var(--amber);
       }
@@ -1127,6 +1133,10 @@
         margin: 0 auto;
       }
 
+      .composer.human-mode .composer-frame {
+        display: none;
+      }
+
       .composer-meta {
         display: none;
         align-items: center;
@@ -1347,6 +1357,195 @@
       .send-button:hover {
         background: #b8b8b9;
         border-color: #b8b8b9;
+      }
+
+      .human-input-card {
+        display: grid;
+        gap: 14px;
+        padding: 16px;
+        border: 1px solid rgba(234, 182, 87, 0.34);
+        border-radius: 14px;
+        background: #202124;
+        box-shadow: var(--shadow);
+      }
+
+      .human-input-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+        gap: 12px;
+      }
+
+      .human-input-title {
+        display: grid;
+        gap: 7px;
+        min-width: 0;
+      }
+
+      .human-input-title strong {
+        overflow-wrap: anywhere;
+        font-size: 15px;
+        line-height: 1.3;
+      }
+
+      .human-input-title span {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .human-input-badge {
+        min-height: 24px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        white-space: nowrap;
+        border: 1px solid rgba(234, 182, 87, 0.35);
+        border-radius: 999px;
+        padding: 3px 8px;
+        background: rgba(234, 182, 87, 0.12);
+        color: #ffd68f;
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .human-context {
+        display: grid;
+        gap: 8px;
+        padding: 10px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: var(--radius);
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .human-context:empty {
+        display: none;
+      }
+
+      .human-context-row {
+        display: grid;
+        grid-template-columns: minmax(88px, 0.36fr) minmax(0, 1fr);
+        gap: 10px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .human-context-row strong {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--faint);
+        font-size: 11px;
+        font-weight: 700;
+        text-overflow: ellipsis;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+
+      .human-context-row span {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        color: var(--text);
+      }
+
+      .human-fields {
+        display: grid;
+        gap: 12px;
+      }
+
+      .human-field {
+        display: grid;
+        gap: 8px;
+        padding: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: var(--radius);
+        background: rgba(13, 15, 18, 0.45);
+      }
+
+      .human-field-head {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .human-field-label {
+        display: grid;
+        gap: 3px;
+        min-width: 0;
+      }
+
+      .human-field-label strong {
+        color: var(--text);
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .human-field-label span {
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
+      .human-field-type {
+        flex: 0 0 auto;
+        border-radius: 999px;
+        padding: 2px 7px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--faint);
+        font-size: 10px;
+        font-weight: 700;
+      }
+
+      .human-choice-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 8px;
+      }
+
+      .human-choice {
+        min-height: 40px;
+        text-align: left;
+        border-color: rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .human-choice[aria-pressed="true"] {
+        border-color: rgba(54, 208, 125, 0.6);
+        background: rgba(54, 208, 125, 0.14);
+        color: #dffdea;
+      }
+
+      .human-field input,
+      .human-field select,
+      .human-field textarea {
+        background: #111315;
+      }
+
+      .human-field textarea {
+        min-height: 92px;
+      }
+
+      .human-json {
+        font-family:
+          "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+      }
+
+      .human-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .human-error {
+        min-height: 18px;
+        color: var(--rose);
+        font-size: 12px;
+      }
+
+      .human-error:empty {
+        display: none;
       }
 
       .view-controls {
@@ -1948,7 +2147,9 @@
       }
 
       .run-modal {
-        width: min(440px, 100%);
+        width: min(560px, 100%);
+        max-height: min(760px, calc(100vh - 48px));
+        overflow: auto;
         display: grid;
         gap: 14px;
         padding: 16px;
@@ -2008,6 +2209,183 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+
+      .run-version-section {
+        display: grid;
+        gap: 7px;
+        padding-bottom: 2px;
+      }
+
+      .run-version-label {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 22px;
+      }
+
+      .run-version-label span {
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.3;
+      }
+
+      .run-version-label strong {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.3;
+        text-align: right;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .run-version-section select {
+        min-height: 40px;
+      }
+
+      .run-version-meta {
+        min-height: 16px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      .run-input-section {
+        display: grid;
+        gap: 10px;
+        padding-top: 2px;
+      }
+
+      .run-input-section.hidden {
+        display: none !important;
+      }
+
+      .run-input-section-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 24px;
+      }
+
+      .run-input-section-head strong {
+        color: var(--text);
+        font-size: 12px;
+        line-height: 1.3;
+      }
+
+      .run-input-section-head span {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 11px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .run-input-fields {
+        display: grid;
+        gap: 12px;
+      }
+
+      .run-input-state {
+        min-height: 42px;
+        display: grid;
+        align-items: center;
+        border: 1px dashed rgba(255, 255, 255, 0.14);
+        border-radius: var(--radius);
+        padding: 10px 12px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .run-field {
+        display: grid;
+        gap: 7px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .run-field:last-child {
+        padding-bottom: 0;
+        border-bottom: 0;
+      }
+
+      .run-field-head {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .run-field-label {
+        display: grid;
+        gap: 3px;
+        min-width: 0;
+      }
+
+      .run-field-label strong {
+        color: var(--text);
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .run-field-label span {
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
+      .run-field-type {
+        flex: 0 0 auto;
+        border-radius: 999px;
+        padding: 2px 7px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--faint);
+        font-size: 10px;
+        font-weight: 700;
+      }
+
+      .run-field textarea {
+        min-height: 92px;
+        resize: vertical;
+      }
+
+      .run-field-error {
+        min-height: 16px;
+        color: var(--rose);
+        font-size: 11px;
+        line-height: 1.35;
+      }
+
+      .run-field-error:empty {
+        display: none;
+      }
+
+      .run-choice-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+        gap: 8px;
+      }
+
+      .run-choice {
+        min-height: 40px;
+        justify-content: start;
+        text-align: left;
+        border-color: rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .run-choice[aria-pressed="true"] {
+        border-color: rgba(118, 212, 255, 0.58);
+        background: rgba(118, 212, 255, 0.13);
+        color: #e0f6ff;
       }
 
       .modal-actions {
@@ -2173,6 +2551,17 @@
 
         .composer-actions {
           gap: 6px;
+        }
+
+        .human-input-head,
+        .human-actions {
+          grid-template-columns: 1fr;
+          align-items: stretch;
+        }
+
+        .human-context-row {
+          grid-template-columns: 1fr;
+          gap: 3px;
         }
 
         .model-chip span {
@@ -2418,12 +2807,27 @@
 
           <div id="transcript" class="transcript" aria-live="polite"></div>
 
-          <div class="composer-wrap">
+          <div class="composer-wrap hidden">
             <form id="composerForm" class="composer">
               <div class="composer-meta">
                 <span id="selectedWorkflow" class="pill">No workflow selected</span>
                 <span id="composerRunMeta" class="meta">No active run</span>
               </div>
+              <section id="humanInputCard" class="human-input-card hidden" aria-live="polite" aria-labelledby="humanInputTitle">
+                <div class="human-input-head">
+                  <div class="human-input-title">
+                    <strong id="humanInputTitle">Human input required</strong>
+                    <span id="humanInputDescription"></span>
+                  </div>
+                  <span id="humanInputBadge" class="human-input-badge">Waiting</span>
+                </div>
+                <div id="humanInputContext" class="human-context"></div>
+                <div id="humanInputFields" class="human-fields"></div>
+                <div class="human-actions">
+                  <div id="humanInputError" class="human-error" role="alert" aria-live="assertive"></div>
+                  <button id="humanInputSubmit" class="primary" type="submit">Submit &amp; resume</button>
+                </div>
+              </section>
               <div class="composer-frame">
                 <div id="mentionMenu" class="mention-menu" role="listbox" aria-label="Workspace files"></div>
                 <div id="mentionChips" class="mention-chips" aria-label="Selected files"></div>
@@ -2558,6 +2962,21 @@
             </label>
             <button id="runChooseWorkspace" type="button">Choose directory</button>
           </div>
+          <div id="runVersionSection" class="run-version-section" aria-live="polite">
+            <label class="run-version-label" for="runVersionSelect">
+              <span>Version</span>
+              <strong id="runVersionStatus">Loading</strong>
+            </label>
+            <select id="runVersionSelect"></select>
+            <p id="runVersionMeta" class="run-version-meta"></p>
+          </div>
+          <div id="runInputSection" class="run-input-section" aria-live="polite">
+            <div class="run-input-section-head">
+              <strong>Inputs</strong>
+              <span id="runInputSummary"></span>
+            </div>
+            <div id="runInputFields" class="run-input-fields"></div>
+          </div>
           <div id="runModalError" class="alert" role="alert" aria-live="assertive"></div>
           <div class="modal-actions">
             <button id="runCancel" type="button">Cancel</button>
@@ -2579,6 +2998,7 @@
       const state = {
         status: null,
         workflows: [],
+        workflowInputSchemas: {},
         workflowRuns: {},
         selectedWorkflowId: null,
         selectedRunId: null,
@@ -2594,6 +3014,21 @@
         workflowMenuId: null,
         runModalWorkflowId: null,
         runModalWorkspacePath: "",
+        runModalVersion: "",
+        runModalVersions: [],
+        runModalActiveVersion: null,
+        runModalSelectedVersion: null,
+        runModalInputSchema: null,
+        runModalInputValues: {},
+        runModalInputErrors: {},
+        runModalJsonInput: "{}",
+        runModalSchemaLoading: false,
+        runModalSchemaRequest: "",
+        pendingHumanRequest: null,
+        humanResponse: {},
+        humanJsonResponse: "{}",
+        humanSubmitError: "",
+        humanResolving: false,
         fileEntries: [],
         terminalRunning: false,
         activeWorkspaceTab: "file",
@@ -2707,12 +3142,27 @@
 
       const shortenId = (value) => (value ? String(value).slice(0, 8) : "");
 
+      const rawStatus = (status) => String(status || "").trim().toLowerCase();
+
+      const isHumanWaitingStatus = (status) =>
+        [
+          "waiting",
+          "waiting_for_human",
+          "waiting_for_input",
+          "waiting_for_approval",
+          "waiting_for_clarification",
+          "awaiting_human",
+          "awaiting_human_input",
+          "human_input_pending",
+        ].includes(rawStatus(status));
+
       const cleanStatus = (status) => {
-        const value = String(status || "").trim().toLowerCase();
+        const value = rawStatus(status);
         if (["succeeded", "success", "completed", "complete", "done"].includes(value)) return "succeeded";
         if (["failed", "failure", "error", "errored", "timed_out", "timeout"].includes(value)) return "failed";
         if (["canceled", "cancelled", "aborted"].includes(value)) return "canceled";
         if (["queued", "pending", "scheduled"].includes(value)) return "queued";
+        if (isHumanWaitingStatus(value)) return "waiting";
         if (["running", "started", "in_progress", "waiting", "processing"].includes(value)) return "running";
         return "ready";
       };
@@ -2723,6 +3173,7 @@
         if (value === "failed") return "Failed";
         if (value === "canceled" || value === "cancelled") return "Canceled";
         if (value === "queued") return "Queued";
+        if (value === "waiting") return "Waiting";
         if (value === "running" || value === "started") return "Running";
         return "Ready";
       };
@@ -3447,16 +3898,40 @@
         const workflow = state.workflows.find((item) => item.id === workflowId);
         state.runModalWorkflowId = workflowId;
         state.runModalWorkspacePath = state.status?.workspacePath || "";
+        state.runModalVersion = "";
+        state.runModalVersions = [];
+        state.runModalActiveVersion = null;
+        state.runModalSelectedVersion = null;
+        state.runModalInputSchema = null;
+        state.runModalInputValues = {};
+        state.runModalInputErrors = {};
+        state.runModalJsonInput = "{}";
+        state.runModalSchemaLoading = true;
+        state.runModalSchemaRequest = "";
         $("runModalTitle").textContent = `Run ${workflow ? workflowName(workflow) : "workflow"}`;
+        $("runModalSubtitle").textContent = "Choose a workspace and fill the start inputs.";
         $("runWorkspacePath").textContent = state.runModalWorkspacePath || "No workspace selected";
         setError("runModalError", "");
+        renderRunVersionControl();
+        renderRunModalInputForm();
         $("runModal").classList.add("open");
         $("runModal").setAttribute("aria-hidden", "false");
+        if (workflow) loadRunModalInputSchema(workflow);
       };
 
       const closeRunModal = () => {
         state.runModalWorkflowId = null;
         state.runModalWorkspacePath = "";
+        state.runModalVersion = "";
+        state.runModalVersions = [];
+        state.runModalActiveVersion = null;
+        state.runModalSelectedVersion = null;
+        state.runModalInputSchema = null;
+        state.runModalInputValues = {};
+        state.runModalInputErrors = {};
+        state.runModalJsonInput = "{}";
+        state.runModalSchemaLoading = false;
+        state.runModalSchemaRequest = "";
         $("runModal").classList.remove("open");
         $("runModal").setAttribute("aria-hidden", "true");
         setError("runModalError", "");
@@ -3571,6 +4046,7 @@
         state.selectedRunId = null;
         state.renderedNodes = new Set();
         state.selectedFiles = [];
+        setActiveHumanRequest(null);
         renderMentionChips();
         closeMentionMenu();
         renderWorkflowList();
@@ -3589,7 +4065,7 @@
         empty.innerHTML = "<h1></h1><div class=\"meta\"></div>";
         empty.querySelector("h1").textContent = workflow ? workflowName(workflow) : "Loomex Runner";
         empty.querySelector(".meta").textContent = workflow
-          ? "Run a prompt to start this workflow."
+          ? "Run this workflow to start local execution."
           : "Choose a workflow from the sidebar.";
         $("transcript").append(empty);
       };
@@ -3674,6 +4150,642 @@
           }
         }
         return JSON.stringify(value, null, 2);
+      };
+
+      const isRecord = (value) =>
+        Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+      const formatFieldLabel = (field) =>
+        String(field || "answer")
+          .replace(/[_-]/g, " ")
+          .replace(/\b\w/g, (char) => char.toUpperCase());
+
+      const schemaFieldType = (definition = {}) => {
+        const type = definition?.type;
+        if (Array.isArray(type)) {
+          return type.find((item) => item !== "null") || "string";
+        }
+        if (!type && Array.isArray(definition?.enum)) return "string";
+        return type || "string";
+      };
+
+      const schemaProperties = (definition = {}) =>
+        isRecord(definition?.properties) ? definition.properties : {};
+
+      const optionValue = (option) => {
+        if (isRecord(option)) {
+          if (option.value !== undefined) return option.value;
+          if (option.id !== undefined) return option.id;
+          if (option.key !== undefined) return option.key;
+          if (option.label !== undefined) return option.label;
+        }
+        return option;
+      };
+
+      const optionLabel = (option) => {
+        if (isRecord(option)) {
+          return String(option.label || option.name || option.title || option.value || option.id || option.key || "");
+        }
+        return String(option);
+      };
+
+      const normalizeOptions = (options) =>
+        Array.isArray(options)
+          ? options
+              .map((option) => ({ label: optionLabel(option), value: optionValue(option) }))
+              .filter((option) => option.label !== "" || option.value !== undefined)
+          : [];
+
+      const schemaOptions = (definition = {}) => {
+        const enumOptions = normalizeOptions(definition.enum);
+        if (enumOptions.length) return enumOptions;
+        for (const key of ["oneOf", "anyOf"]) {
+          const options = normalizeOptions(
+            Array.isArray(definition[key])
+              ? definition[key].map((option) =>
+                  isRecord(option)
+                    ? {
+                        label: option.title || option.label || option.const || option.enum?.[0],
+                        value: option.const ?? option.value ?? option.enum?.[0],
+                      }
+                    : option,
+                )
+              : [],
+          );
+          if (options.length) return options;
+        }
+        return [];
+      };
+
+      const requestOptions = (request = {}) =>
+        normalizeOptions(
+          request.options ||
+            request.choices ||
+            request.outputOptions ||
+            request.output_options ||
+            request.config?.options ||
+            request.config?.choices,
+        );
+
+      const schemaFromHumanRequest = (request = {}) => {
+        const explicit =
+          request.outputSchema ||
+          request.output_schema ||
+          request.answerSchema ||
+          request.answer_schema ||
+          request.schema;
+        if (isRecord(explicit)) return explicit;
+
+        const options = requestOptions(request);
+        if (options.length) {
+          return { type: "string", enum: options.map((option) => option.value) };
+        }
+
+        const rawType = String(
+          request.inputType ||
+            request.input_type ||
+            request.answerType ||
+            request.answer_type ||
+            request.valueType ||
+            request.value_type ||
+            "",
+        ).toLowerCase();
+        if (["text", "textarea", "string", "options", "option"].includes(rawType)) {
+          return { type: "string" };
+        }
+        if (["bool", "boolean"].includes(rawType)) return { type: "boolean" };
+        if (["int", "integer"].includes(rawType)) return { type: "integer" };
+        if (["number", "float"].includes(rawType)) return { type: "number" };
+        return null;
+      };
+
+      const defaultFieldValue = (definition = {}) => {
+        if (definition.default !== undefined) return definition.default;
+        const options = schemaOptions(definition);
+        if (options.length === 1) return options[0].value;
+        const type = schemaFieldType(definition);
+        if (type === "array") return [];
+        if (type === "object") {
+          return Object.fromEntries(
+            Object.entries(schemaProperties(definition)).map(([field, child]) => [
+              field,
+              defaultFieldValue(child),
+            ]),
+          );
+        }
+        return "";
+      };
+
+      const responseAnswer = (answer) => {
+        if (!answer) return {};
+        if (typeof answer === "string") {
+          try {
+            const parsed = JSON.parse(answer);
+            return isRecord(parsed) ? parsed : { value: parsed };
+          } catch {
+            return { value: answer };
+          }
+        }
+        return isRecord(answer) ? answer : { value: answer };
+      };
+
+      const isPendingHumanRequest = (request) => {
+        if (!request) return false;
+        const status = rawStatus(request.status || "pending");
+        return !status || ["pending", "in_review", "waiting"].includes(status);
+      };
+
+      const normalizeHumanRequest = (raw, execution = {}, fallbackWorkflowId = "") => {
+        if (!isRecord(raw)) return null;
+        const request =
+          (isRecord(raw.humanRequest) && raw.humanRequest) ||
+          (isRecord(raw.human_request) && raw.human_request) ||
+          (isRecord(raw.request) && raw.request) ||
+          raw;
+        if (!isRecord(request)) return null;
+        const id =
+          request.id ||
+          request.requestId ||
+          request.request_id ||
+          request.humanRequestId ||
+          request.human_request_id;
+        if (!id) return null;
+        const normalized = {
+          ...request,
+          id: String(id),
+          status: String(request.status || raw.status || "pending"),
+          title: String(
+            request.question ||
+              request.title ||
+              request.preview?.title ||
+              request.node?.name ||
+              "Human input required",
+          ),
+          description: String(
+            request.context?.summary ||
+              request.description ||
+              request.summary ||
+              request.preview?.description ||
+              "",
+          ),
+          question: String(request.question || request.title || "Human input required"),
+          workflowId: String(
+            request.workflow?.id ||
+              request.workflowId ||
+              request.workflow_id ||
+              execution.workflowId ||
+              execution.workflow_id ||
+              fallbackWorkflowId ||
+              "",
+          ),
+          workflowName: String(
+            request.workflow?.name ||
+              request.workflowName ||
+              request.workflow_name ||
+              workflowName(selectedWorkflow()),
+          ),
+          executionId: String(
+            request.execution?.id ||
+              request.executionId ||
+              request.execution_id ||
+              execution.id ||
+              execution.executionId ||
+              "",
+          ),
+          outputSchema: schemaFromHumanRequest(request),
+          reviewInput: request.reviewInput || request.review_input || null,
+          answer: responseAnswer(request.answer),
+          options: requestOptions(request),
+          blocking: Boolean(request.blocking),
+        };
+        return isPendingHumanRequest(normalized) ? normalized : null;
+      };
+
+      const humanFieldSpecs = (request = state.pendingHumanRequest) => {
+        if (!request) return [];
+        const schema = request.outputSchema;
+        const properties = schemaProperties(schema || {});
+        const required = Array.isArray(schema?.required) ? schema.required.map(String) : [];
+        if (Object.keys(properties).length) {
+          return Object.entries(properties).map(([key, definition]) => ({
+            key,
+            definition,
+            required: required.includes(key),
+            scalarRoot: false,
+            jsonFallback: false,
+          }));
+        }
+        if (schema && schemaFieldType(schema) === "object") {
+          return [
+            {
+              key: "__json",
+              definition: {
+                title: request.question || request.title || "Answer JSON",
+                description: request.description || "Stored as the human answer for this workflow step.",
+                ...schema,
+              },
+              required: true,
+              scalarRoot: false,
+              jsonFallback: true,
+            },
+          ];
+        }
+        if (schema) {
+          return [
+            {
+              key: "value",
+              definition: {
+                title: request.question || request.title || "Answer",
+                description: request.description || "",
+                ...schema,
+                enum: schema.enum || request.options?.map((option) => option.value),
+              },
+              required: true,
+              scalarRoot: true,
+              jsonFallback: false,
+            },
+          ];
+        }
+        return [
+          {
+            key: "__json",
+            definition: {
+              type: "object",
+              title: "Answer JSON",
+              description: "Stored as the human answer for this workflow step.",
+            },
+            required: true,
+            scalarRoot: false,
+            jsonFallback: true,
+          },
+        ];
+      };
+
+      const hydrateHumanResponse = (request) => {
+        const answer = responseAnswer(request?.answer);
+        const response = {};
+        for (const spec of humanFieldSpecs(request)) {
+          if (spec.jsonFallback) continue;
+          response[spec.key] =
+            answer[spec.key] !== undefined
+              ? answer[spec.key]
+              : spec.scalarRoot && answer.value !== undefined
+              ? answer.value
+              : defaultFieldValue(spec.definition);
+        }
+        state.humanResponse = response;
+        state.humanJsonResponse = JSON.stringify(answer && Object.keys(answer).length ? answer : {}, null, 2);
+        state.humanSubmitError = "";
+      };
+
+      const setActiveHumanRequest = (request) => {
+        const currentId = state.pendingHumanRequest?.id || null;
+        const nextId = request?.id || null;
+        if (!request) {
+          state.pendingHumanRequest = null;
+          state.humanResponse = {};
+          state.humanJsonResponse = "{}";
+          state.humanSubmitError = "";
+          renderHumanInputComposer();
+          return;
+        }
+        const currentSchema = JSON.stringify(state.pendingHumanRequest?.outputSchema || null);
+        const nextSchema = JSON.stringify(request.outputSchema || null);
+        state.pendingHumanRequest = request;
+        if (currentId !== nextId || currentSchema !== nextSchema) {
+          hydrateHumanResponse(request);
+        }
+        renderHumanInputComposer();
+      };
+
+      const humanReviewContextRows = (request) => {
+        const rows = [];
+        if (request.executionId) rows.push(["Execution", shortenId(request.executionId)]);
+        if (request.workflowName) rows.push(["Workflow", request.workflowName]);
+        const reviewInput = request.reviewInput;
+        const nodeInput = isRecord(reviewInput?.nodeInput) ? reviewInput.nodeInput : null;
+        if (nodeInput) {
+          Object.entries(nodeInput)
+            .slice(0, 3)
+            .forEach(([key, value]) => rows.push([formatFieldLabel(key), formatHumanPreview(value)]));
+        }
+        return rows;
+      };
+
+      const formatHumanPreview = (value) => {
+        if (value === null || value === undefined || value === "") return "Empty";
+        if (typeof value === "string") return value.length > 120 ? `${value.slice(0, 120)}...` : value;
+        if (typeof value === "number" || typeof value === "boolean") return String(value);
+        if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? "" : "s"}`;
+        if (isRecord(value)) return `${Object.keys(value).length} field${Object.keys(value).length === 1 ? "" : "s"}`;
+        return String(value);
+      };
+
+      const setHumanFieldValue = (field, value, rerender = false) => {
+        state.humanResponse = { ...state.humanResponse, [field]: value };
+        state.humanSubmitError = "";
+        if (rerender) renderHumanInputComposer();
+        else $("humanInputError").textContent = "";
+      };
+
+      const renderHumanControl = (container, spec) => {
+        const definition = spec.definition || {};
+        const type = schemaFieldType(definition);
+        const options = schemaOptions(definition);
+        const value = state.humanResponse[spec.key];
+
+        if (spec.jsonFallback || type === "object" || type === "array") {
+          const textarea = document.createElement("textarea");
+          textarea.className = "human-json";
+          textarea.spellcheck = false;
+          textarea.value = spec.jsonFallback
+            ? state.humanJsonResponse
+            : typeof value === "string"
+            ? value
+            : JSON.stringify(value ?? defaultFieldValue(definition), null, 2);
+          textarea.addEventListener("input", () => {
+            state.humanSubmitError = "";
+            $("humanInputError").textContent = "";
+            if (spec.jsonFallback) state.humanJsonResponse = textarea.value;
+            else state.humanResponse = { ...state.humanResponse, [spec.key]: textarea.value };
+          });
+          container.append(textarea);
+          return;
+        }
+
+        if (options.length) {
+          if (options.length > 6) {
+            const select = document.createElement("select");
+            select.value = value ?? "";
+            const empty = document.createElement("option");
+            empty.value = "";
+            empty.textContent = "Choose an option";
+            select.append(empty);
+            options.forEach((option) => {
+              const item = document.createElement("option");
+              item.value = String(option.value);
+              item.textContent = option.label;
+              select.append(item);
+            });
+            select.addEventListener("change", () => setHumanFieldValue(spec.key, select.value));
+            container.append(select);
+            return;
+          }
+          const grid = document.createElement("div");
+          grid.className = "human-choice-grid";
+          options.forEach((option) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "human-choice";
+            button.setAttribute("aria-pressed", String(value === option.value || String(value) === String(option.value)));
+            button.textContent = option.label;
+            button.addEventListener("click", () => setHumanFieldValue(spec.key, option.value, true));
+            grid.append(button);
+          });
+          container.append(grid);
+          return;
+        }
+
+        if (type === "boolean") {
+          const grid = document.createElement("div");
+          grid.className = "human-choice-grid";
+          [
+            [true, ["approved", "is_approved"].includes(spec.key) ? "Approve" : "Yes"],
+            [false, ["approved", "is_approved"].includes(spec.key) ? "Reject" : "No"],
+          ].forEach(([nextValue, label]) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "human-choice";
+            button.setAttribute("aria-pressed", String(value === nextValue));
+            button.textContent = label;
+            button.addEventListener("click", () => setHumanFieldValue(spec.key, nextValue, true));
+            grid.append(button);
+          });
+          container.append(grid);
+          return;
+        }
+
+        if (type === "integer" || type === "number") {
+          const input = document.createElement("input");
+          input.type = "number";
+          input.step = type === "integer" ? "1" : "any";
+          input.value = value ?? "";
+          input.addEventListener("input", () => {
+            setHumanFieldValue(spec.key, input.value === "" ? "" : Number(input.value));
+          });
+          container.append(input);
+          return;
+        }
+
+        const textarea = document.createElement("textarea");
+        textarea.value = value ?? "";
+        textarea.placeholder = "Type your response...";
+        textarea.addEventListener("input", () => setHumanFieldValue(spec.key, textarea.value));
+        container.append(textarea);
+      };
+
+      const renderHumanInputComposer = () => {
+        const wrap = document.querySelector(".composer-wrap");
+        const form = $("composerForm");
+        const card = $("humanInputCard");
+        const request = state.pendingHumanRequest;
+        wrap?.classList.toggle("hidden", !request);
+        form.classList.toggle("human-mode", Boolean(request));
+        card.classList.toggle("hidden", !request);
+        if (!request) return;
+
+        $("humanInputTitle").textContent = request.question || request.title || "Human input required";
+        $("humanInputDescription").textContent =
+          request.description || "This workflow is paused until you submit a response.";
+        $("humanInputBadge").textContent = request.blocking ? "Blocking" : "Waiting";
+        $("humanInputSubmit").disabled = state.humanResolving;
+        $("humanInputSubmit").textContent = state.humanResolving ? "Submitting..." : "Submit & resume";
+        $("humanInputError").textContent = state.humanSubmitError || "";
+
+        const context = $("humanInputContext");
+        context.innerHTML = "";
+        humanReviewContextRows(request).forEach(([label, value]) => {
+          const row = document.createElement("div");
+          row.className = "human-context-row";
+          row.innerHTML = "<strong></strong><span></span>";
+          row.querySelector("strong").textContent = label;
+          row.querySelector("span").textContent = value;
+          context.append(row);
+        });
+
+        const fields = $("humanInputFields");
+        fields.innerHTML = "";
+        for (const spec of humanFieldSpecs(request)) {
+          const field = document.createElement("div");
+          field.className = "human-field";
+          const label = spec.definition?.title || formatFieldLabel(spec.key === "value" ? "Answer" : spec.key);
+          const description = spec.definition?.description || "";
+          field.innerHTML = `
+            <div class="human-field-head">
+              <div class="human-field-label">
+                <strong></strong>
+                <span></span>
+              </div>
+              <span class="human-field-type"></span>
+            </div>
+          `;
+          field.querySelector("strong").textContent = `${label}${spec.required ? " *" : ""}`;
+          field.querySelector(".human-field-label span").textContent = description;
+          field.querySelector(".human-field-label span").classList.toggle("hidden", !description);
+          field.querySelector(".human-field-type").textContent = spec.jsonFallback
+            ? "json"
+            : schemaOptions(spec.definition).length
+            ? "options"
+            : schemaFieldType(spec.definition);
+          renderHumanControl(field, spec);
+          fields.append(field);
+        }
+      };
+
+      const parseHumanJsonField = (value, fallback) => {
+        if (typeof value !== "string") return value;
+        try {
+          return JSON.parse(value || fallback);
+        } catch {
+          throw new Error("JSON response is invalid.");
+        }
+      };
+
+      const isEmptyHumanValue = (value) =>
+        value === undefined ||
+        value === null ||
+        value === "" ||
+        (Array.isArray(value) && value.length === 0);
+
+      const coerceHumanValue = (spec, value) => {
+        const type = schemaFieldType(spec.definition);
+        if (spec.jsonFallback) {
+          const parsed = parseHumanJsonField(state.humanJsonResponse.trim(), "{}");
+          if (!isRecord(parsed)) throw new Error("Response must be a JSON object.");
+          return parsed;
+        }
+        if (type === "object") {
+          const parsed = parseHumanJsonField(value, "{}");
+          if (!isRecord(parsed)) throw new Error(`${formatFieldLabel(spec.key)} must be an object.`);
+          return parsed;
+        }
+        if (type === "array") {
+          const parsed = parseHumanJsonField(value, "[]");
+          if (!Array.isArray(parsed)) throw new Error(`${formatFieldLabel(spec.key)} must be an array.`);
+          return parsed;
+        }
+        if (type === "integer") {
+          const number = Number(value);
+          if (!Number.isInteger(number)) throw new Error(`${formatFieldLabel(spec.key)} must be an integer.`);
+          return number;
+        }
+        if (type === "number") {
+          const number = Number(value);
+          if (!Number.isFinite(number)) throw new Error(`${formatFieldLabel(spec.key)} must be a number.`);
+          return number;
+        }
+        if (type === "boolean") {
+          if (typeof value !== "boolean") throw new Error(`${formatFieldLabel(spec.key)} must be Yes or No.`);
+          return value;
+        }
+        return String(value ?? "");
+      };
+
+      const buildHumanAnswer = () => {
+        const specs = humanFieldSpecs();
+        if (!specs.length) return {};
+        const answer = {};
+        for (const spec of specs) {
+          if (spec.jsonFallback) return coerceHumanValue(spec, state.humanJsonResponse);
+          const value = state.humanResponse[spec.key];
+          if (spec.required && isEmptyHumanValue(value)) {
+            throw new Error(`${formatFieldLabel(spec.key === "value" ? "answer" : spec.key)} is required.`);
+          }
+          if (!spec.required && isEmptyHumanValue(value)) continue;
+          const coerced = coerceHumanValue(spec, value);
+          if (spec.scalarRoot) return { value: coerced };
+          answer[spec.key] = coerced;
+        }
+        return answer;
+      };
+
+      const updateHumanRequestForExecution = async (execution, workflowId) => {
+        if (!isHumanWaitingStatus(execution?.status)) {
+          setActiveHumanRequest(null);
+          return null;
+        }
+        const directRequest = normalizeHumanRequest(
+          execution?.humanRequest || execution?.human_request,
+          execution,
+          workflowId,
+        );
+        if (directRequest) {
+          setActiveHumanRequest(directRequest);
+          return directRequest;
+        }
+        const executionId = execution?.id || execution?.executionId;
+        if (!workflowId || !executionId) {
+          setActiveHumanRequest(null);
+          return null;
+        }
+        try {
+          const response = await call("human_request_list", {
+            request: { profile: null, workflowId, executionId },
+          });
+          const request = (response.humanRequests || response.human_requests || [])
+            .map((item) => normalizeHumanRequest(item, execution, workflowId))
+            .find(Boolean);
+          setActiveHumanRequest(request || null);
+          return request || null;
+        } catch {
+          setActiveHumanRequest(null);
+          return null;
+        }
+      };
+
+      const resolveHumanInput = async () => {
+        const request = state.pendingHumanRequest;
+        if (!request || state.humanResolving) return;
+        let answer;
+        try {
+          answer = buildHumanAnswer();
+        } catch (error) {
+          state.humanSubmitError = error.message;
+          renderHumanInputComposer();
+          return;
+        }
+        state.humanResolving = true;
+        state.humanSubmitError = "";
+        renderHumanInputComposer();
+        try {
+          const response = await call("human_request_resolve", {
+            request: {
+              profile: null,
+              requestId: request.id,
+              action: "submit",
+              answer,
+            },
+          });
+          appendMessage("system", "Human response submitted. Resuming workflow...", "Human input");
+          setActiveHumanRequest(null);
+          const executionId = response?.result?.executionId || request.executionId || state.selectedRunId;
+          if (executionId) {
+            const detail = await call("workflow_run_detail", {
+              request: { profile: null, executionId },
+            });
+            const execution = executionFromDetailResponse(detail);
+            const humanRequest = await renderExecutionTimeline(execution, true);
+            if (!terminalExecutionStatuses.has(cleanStatus(execution.status)) && !humanRequest) {
+              await pollExecution(executionId);
+            }
+          }
+        } catch (error) {
+          state.humanSubmitError = error.message;
+          renderHumanInputComposer();
+        } finally {
+          state.humanResolving = false;
+          renderHumanInputComposer();
+        }
       };
 
       const nodeMessageText = (key, output, execution) => {
@@ -3844,6 +4956,7 @@
         setRunChrome({ executionId, status, summary });
         renderArtifacts(files);
         renderWorkflowGraph(execution);
+        const humanRequest = await updateHumanRequestForExecution(execution, workflowId);
 
         const nodeOutputs = execution.output?.nodeOutputs || {};
         if (terminalExecutionStatuses.has(status)) {
@@ -3858,14 +4971,28 @@
           }
         }
         if (terminalExecutionStatuses.has(status)) {
+          setActiveHumanRequest(null);
           removeActiveNode(execution);
           appendTerminalMessage(execution, status);
+        } else if (humanRequest) {
+          appendActiveNode(execution, "Waiting for your response...");
         } else if (!nodeOutputs.end) {
           appendActiveNode(execution, status === "queued" ? "Waiting for runner..." : "Thinking");
         }
+        return humanRequest;
       };
 
-      const executionFromDetailResponse = (response) => response?.result?.execution || {};
+      const executionFromDetailResponse = (response) => {
+        const result = response?.result || {};
+        const execution = result.execution || {};
+        const humanRequest =
+          result.humanRequest ||
+          result.human_request ||
+          execution.humanRequest ||
+          execution.human_request ||
+          null;
+        return humanRequest ? { ...execution, humanRequest } : execution;
+      };
 
       const pollExecution = async (executionId) => {
         if (!executionId || executionId === "execution") return;
@@ -3878,8 +5005,9 @@
             },
           });
           const execution = executionFromDetailResponse(response);
-          await renderExecutionTimeline(execution, true);
+          const humanRequest = await renderExecutionTimeline(execution, true);
           if (terminalExecutionStatuses.has(cleanStatus(execution.status))) return;
+          if (humanRequest) return;
         }
       };
 
@@ -3971,23 +5099,577 @@
         }
       };
 
+      const workflowInputSchemaKey = (workflowId, version = null) =>
+        `${workflowId}::${version && String(version).trim() ? String(version).trim() : "active"}`;
+
+      const workflowVersionNumber = (version) =>
+        isRecord(version) ? version.versionNumber ?? version.version ?? null : null;
+
+      const workflowVersionValue = (version) => {
+        const number = workflowVersionNumber(version);
+        return number === null || number === undefined ? "" : String(number);
+      };
+
+      const workflowVersionStatus = (version) => {
+        if (!isRecord(version)) return "";
+        const status = String(version.status || "").toLowerCase();
+        if (version.isActive || version.is_active) return "Active";
+        if (status === "archived") return "Archived";
+        if (status === "draft") return "Draft";
+        return status ? status.charAt(0).toUpperCase() + status.slice(1) : "Published";
+      };
+
+      const formatShortDate = (value) => {
+        if (!value) return "";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return "";
+        return date.toLocaleDateString(undefined, {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        });
+      };
+
+      const workflowVersionLabel = (version) => {
+        const number = workflowVersionNumber(version);
+        const label = number === null || number === undefined ? "Version" : `Version ${number}`;
+        const status = workflowVersionStatus(version);
+        return status ? `${label} (${status})` : label;
+      };
+
+      const workflowVersionMeta = (version, versions = []) => {
+        if (!isRecord(version)) return "";
+        const parts = [];
+        const number = workflowVersionNumber(version);
+        if (number !== null && number !== undefined) parts.push(`Version ${number}`);
+        const status = workflowVersionStatus(version);
+        if (status) parts.push(status);
+        const latest = versions
+          .map(workflowVersionNumber)
+          .filter((value) => Number.isFinite(Number(value)))
+          .map(Number)
+          .sort((a, b) => b - a)[0];
+        if (latest !== undefined && Number(number) === latest) parts.push("Latest");
+        const date = formatShortDate(version.activatedAt || version.createdAt);
+        if (date) parts.push(date);
+        const notes = String(version.notes || "").trim();
+        if (notes) parts.push(notes.length > 84 ? `${notes.slice(0, 81)}...` : notes);
+        return parts.join(" / ");
+      };
+
+      const normalizeWorkflowInputDetail = (response = {}) => {
+        const inputSchema = response?.inputSchema || response?.input_schema || null;
+        const activeVersion = response?.activeVersion || response?.active_version || null;
+        const selectedVersion = response?.selectedVersion || response?.selected_version || activeVersion || null;
+        const versions = Array.isArray(response?.versions) ? [...response.versions] : [];
+        [selectedVersion, activeVersion].forEach((version) => {
+          const value = workflowVersionValue(version);
+          if (value && !versions.some((item) => workflowVersionValue(item) === value)) {
+            versions.push(version);
+          }
+        });
+        versions.sort((a, b) => Number(workflowVersionNumber(b) || 0) - Number(workflowVersionNumber(a) || 0));
+        return {
+          inputSchema,
+          activeVersion,
+          selectedVersion,
+          versions,
+        };
+      };
+
+      const loadWorkflowInputDetail = async (workflowId, version = null) => {
+        if (!workflowId) return null;
+        const cacheKey = workflowInputSchemaKey(workflowId, version);
+        if (Object.prototype.hasOwnProperty.call(state.workflowInputSchemas, cacheKey)) {
+          return state.workflowInputSchemas[cacheKey];
+        }
+        try {
+          const response = await call("workflow_input_schema", {
+            request: { profile: null, workflowId, version: version || null },
+          });
+          const detail = normalizeWorkflowInputDetail(response);
+          state.workflowInputSchemas[cacheKey] = detail;
+          return detail;
+        } catch {
+          return null;
+        }
+      };
+
+      const loadWorkflowInputSchema = async (workflowId, version = null) => {
+        const detail = await loadWorkflowInputDetail(workflowId, version);
+        return detail?.inputSchema || null;
+      };
+
+      const renderRunVersionControl = () => {
+        const select = $("runVersionSelect");
+        const status = $("runVersionStatus");
+        const meta = $("runVersionMeta");
+        if (!select || !status || !meta) return;
+        select.innerHTML = "";
+        const versions = Array.isArray(state.runModalVersions) ? state.runModalVersions : [];
+        if (state.runModalSchemaLoading && !versions.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "Loading versions...";
+          select.append(option);
+          select.disabled = true;
+          status.textContent = "Loading";
+          meta.textContent = "Fetching workflow versions and inputs.";
+          return;
+        }
+
+        if (!versions.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "Active version";
+          select.append(option);
+          select.disabled = true;
+          status.textContent = "Active";
+          meta.textContent = "No version metadata is available for this workflow.";
+          return;
+        }
+
+        const fallback =
+          versions.find((version) => version.isActive || version.is_active) ||
+          state.runModalSelectedVersion ||
+          versions[0];
+        const selectedValue = state.runModalVersion || workflowVersionValue(fallback);
+        for (const version of versions) {
+          const option = document.createElement("option");
+          option.value = workflowVersionValue(version);
+          option.textContent = workflowVersionLabel(version);
+          select.append(option);
+        }
+        select.value = selectedValue;
+        state.runModalVersion = selectedValue;
+        const selectedVersion =
+          versions.find((version) => workflowVersionValue(version) === selectedValue) || fallback;
+        status.textContent = workflowVersionStatus(selectedVersion) || "Selected";
+        meta.textContent = workflowVersionMeta(selectedVersion, versions);
+        select.disabled = state.runModalSchemaLoading || versions.length <= 1;
+      };
+
+      const reservedRunInputFields = new Set(["_loomexRunner", "workspacePath"]);
+
+      const runInputFieldSpecs = (schema = state.runModalInputSchema) => {
+        if (!isRecord(schema)) return [];
+        const required = Array.isArray(schema.required) ? schema.required.map(String) : [];
+        const properties = schemaProperties(schema);
+        if (Object.keys(properties).length) {
+          return Object.entries(properties)
+            .filter(([key]) => !reservedRunInputFields.has(key))
+            .map(([key, definition]) => ({
+              key,
+              definition,
+              required: required.includes(key),
+              scalarRoot: false,
+              jsonFallback: false,
+            }));
+        }
+        if (schemaFieldType(schema) === "object") return [];
+        return [
+          {
+            key: "value",
+            definition: {
+              title: schema.title || "Input",
+              description: schema.description || "",
+              ...schema,
+            },
+            required: true,
+            scalarRoot: true,
+            jsonFallback: false,
+          },
+        ];
+      };
+
+      const hydrateRunModalInputValues = (schema) => {
+        const values = {};
+        for (const spec of runInputFieldSpecs(schema)) {
+          values[spec.key] = defaultFieldValue(spec.definition);
+        }
+        state.runModalInputValues = values;
+        state.runModalInputErrors = {};
+        state.runModalJsonInput = "{}";
+      };
+
+      const loadRunModalInputSchema = async (workflow, version = null) => {
+        const workflowId = workflow?.id;
+        if (!workflowId) return;
+        const requestVersion = version && String(version).trim() ? String(version).trim() : null;
+        const requestKey = workflowInputSchemaKey(workflowId, requestVersion);
+        state.runModalSchemaRequest = requestKey;
+        state.runModalSchemaLoading = true;
+        renderRunVersionControl();
+        renderRunModalInputForm();
+        const detail = await loadWorkflowInputDetail(workflowId, requestVersion);
+        if (state.runModalWorkflowId !== workflowId || state.runModalSchemaRequest !== requestKey) return;
+        state.runModalActiveVersion = detail?.activeVersion || null;
+        state.runModalSelectedVersion = detail?.selectedVersion || detail?.activeVersion || null;
+        state.runModalVersions = Array.isArray(detail?.versions) ? detail.versions : [];
+        state.runModalVersion =
+          workflowVersionValue(state.runModalSelectedVersion) ||
+          requestVersion ||
+          workflowVersionValue(state.runModalActiveVersion);
+        state.runModalInputSchema = detail?.inputSchema || null;
+        hydrateRunModalInputValues(state.runModalInputSchema);
+        state.runModalSchemaLoading = false;
+        renderRunVersionControl();
+        renderRunModalInputForm();
+      };
+
+      const setRunInputValue = (field, value, rerender = false) => {
+        state.runModalInputValues = { ...state.runModalInputValues, [field]: value };
+        const nextErrors = { ...state.runModalInputErrors };
+        delete nextErrors[field];
+        state.runModalInputErrors = nextErrors;
+        setError("runModalError", "");
+        if (rerender) renderRunModalInputForm();
+        else document.querySelector(`[data-run-input-error="${field}"]`)?.replaceChildren();
+      };
+
+      const runInputTypeLabel = (spec) =>
+        spec.jsonFallback
+          ? "json"
+          : schemaOptions(spec.definition).length
+          ? "options"
+          : schemaFieldType(spec.definition);
+
+      const isMultilineRunInput = (spec) => {
+        const definition = spec.definition || {};
+        const key = String(spec.key || "").toLowerCase();
+        const format = String(definition.format || definition.ui || "").toLowerCase();
+        return (
+          ["prompt", "message", "request", "description", "instructions"].includes(key) ||
+          ["textarea", "text", "markdown"].includes(format) ||
+          Number(definition.maxLength || 0) > 160
+        );
+      };
+
+      const renderRunControl = (container, spec) => {
+        const definition = spec.definition || {};
+        const type = schemaFieldType(definition);
+        const options = schemaOptions(definition);
+        const value = state.runModalInputValues[spec.key];
+        const invalid = Boolean(state.runModalInputErrors[spec.key]);
+
+        if (type === "object" || type === "array") {
+          const textarea = document.createElement("textarea");
+          textarea.spellcheck = false;
+          textarea.dataset.runInput = spec.key;
+          textarea.setAttribute("aria-invalid", String(invalid));
+          textarea.value =
+            typeof value === "string"
+              ? value
+              : JSON.stringify(value ?? defaultFieldValue(definition), null, 2);
+          textarea.addEventListener("input", () => setRunInputValue(spec.key, textarea.value));
+          container.append(textarea);
+          return;
+        }
+
+        if (options.length) {
+          if (options.length > 6) {
+            const select = document.createElement("select");
+            select.dataset.runInput = spec.key;
+            select.setAttribute("aria-invalid", String(invalid));
+            select.value = value ?? "";
+            const empty = document.createElement("option");
+            empty.value = "";
+            empty.textContent = "Choose an option";
+            select.append(empty);
+            options.forEach((option) => {
+              const item = document.createElement("option");
+              item.value = String(option.value);
+              item.textContent = option.label;
+              select.append(item);
+            });
+            select.addEventListener("change", () => setRunInputValue(spec.key, select.value));
+            container.append(select);
+            return;
+          }
+          const grid = document.createElement("div");
+          grid.className = "run-choice-grid";
+          options.forEach((option) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "run-choice";
+            button.dataset.runInput = spec.key;
+            button.setAttribute("aria-pressed", String(value === option.value || String(value) === String(option.value)));
+            button.textContent = option.label;
+            button.addEventListener("click", () => setRunInputValue(spec.key, option.value, true));
+            grid.append(button);
+          });
+          container.append(grid);
+          return;
+        }
+
+        if (type === "boolean") {
+          const grid = document.createElement("div");
+          grid.className = "run-choice-grid";
+          [
+            [true, "Yes"],
+            [false, "No"],
+          ].forEach(([nextValue, label]) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "run-choice";
+            button.dataset.runInput = spec.key;
+            button.setAttribute("aria-pressed", String(value === nextValue));
+            button.textContent = label;
+            button.addEventListener("click", () => setRunInputValue(spec.key, nextValue, true));
+            grid.append(button);
+          });
+          container.append(grid);
+          return;
+        }
+
+        if (type === "integer" || type === "number") {
+          const input = document.createElement("input");
+          input.type = "number";
+          input.step = type === "integer" ? "1" : "any";
+          input.dataset.runInput = spec.key;
+          input.setAttribute("aria-invalid", String(invalid));
+          input.value = value ?? "";
+          input.addEventListener("input", () => {
+            setRunInputValue(spec.key, input.value === "" ? "" : Number(input.value));
+          });
+          container.append(input);
+          return;
+        }
+
+        if (isMultilineRunInput(spec)) {
+          const textarea = document.createElement("textarea");
+          textarea.dataset.runInput = spec.key;
+          textarea.setAttribute("aria-invalid", String(invalid));
+          textarea.value = value ?? "";
+          textarea.spellcheck = true;
+          textarea.addEventListener("input", () => setRunInputValue(spec.key, textarea.value));
+          container.append(textarea);
+          return;
+        }
+
+        const input = document.createElement("input");
+        input.type = "text";
+        input.autocomplete = "off";
+        input.dataset.runInput = spec.key;
+        input.setAttribute("aria-invalid", String(invalid));
+        input.value = value ?? "";
+        input.addEventListener("input", () => setRunInputValue(spec.key, input.value));
+        container.append(input);
+      };
+
+      const renderRunModalInputForm = () => {
+        const section = $("runInputSection");
+        const fields = $("runInputFields");
+        const summary = $("runInputSummary");
+        fields.innerHTML = "";
+
+        if (state.runModalSchemaLoading) {
+          section.classList.remove("hidden");
+          summary.textContent = "Loading";
+          const loading = document.createElement("div");
+          loading.className = "run-input-state";
+          loading.textContent = "Loading workflow inputs...";
+          fields.append(loading);
+          $("runConfirm").disabled = true;
+          return;
+        }
+
+        const specs = runInputFieldSpecs();
+        if (!specs.length) {
+          section.classList.add("hidden");
+          summary.textContent = "";
+          $("runConfirm").disabled = false;
+          return;
+        }
+
+        section.classList.remove("hidden");
+        const requiredCount = specs.filter((spec) => spec.required).length;
+        summary.textContent = requiredCount ? `${requiredCount} required` : "Optional";
+        for (const spec of specs) {
+          const field = document.createElement("div");
+          field.className = "run-field";
+          const label = spec.definition?.title || formatFieldLabel(spec.key === "value" ? "Input" : spec.key);
+          const description = spec.definition?.description || "";
+          field.innerHTML = `
+            <div class="run-field-head">
+              <div class="run-field-label">
+                <strong></strong>
+                <span></span>
+              </div>
+              <span class="run-field-type"></span>
+            </div>
+            <div class="run-field-control"></div>
+            <div class="run-field-error" role="alert"></div>
+          `;
+          field.querySelector("strong").textContent = `${label}${spec.required ? " *" : ""}`;
+          field.querySelector(".run-field-label span").textContent = description;
+          field.querySelector(".run-field-label span").classList.toggle("hidden", !description);
+          field.querySelector(".run-field-type").textContent = runInputTypeLabel(spec);
+          field.querySelector(".run-field-error").dataset.runInputError = spec.key;
+          field.querySelector(".run-field-error").textContent = state.runModalInputErrors[spec.key] || "";
+          renderRunControl(field.querySelector(".run-field-control"), spec);
+          fields.append(field);
+        }
+        $("runConfirm").disabled = false;
+      };
+
+      const parseRunJsonField = (value, fallback) => {
+        if (typeof value !== "string") return value;
+        try {
+          return JSON.parse(value || fallback);
+        } catch {
+          throw new Error("must be valid JSON");
+        }
+      };
+
+      const coerceRunInputValue = (spec, value) => {
+        const type = schemaFieldType(spec.definition);
+        if (type === "object") {
+          const parsed = parseRunJsonField(value, "{}");
+          if (!isRecord(parsed)) throw new Error("must be a JSON object");
+          return parsed;
+        }
+        if (type === "array") {
+          const parsed = parseRunJsonField(value, "[]");
+          if (!Array.isArray(parsed)) throw new Error("must be a JSON array");
+          return parsed;
+        }
+        if (type === "integer") {
+          const number = Number(value);
+          if (!Number.isInteger(number)) throw new Error("must be an integer");
+          return number;
+        }
+        if (type === "number") {
+          const number = Number(value);
+          if (!Number.isFinite(number)) throw new Error("must be a number");
+          return number;
+        }
+        if (type === "boolean") {
+          if (typeof value !== "boolean") throw new Error("must be Yes or No");
+          return value;
+        }
+        return String(value ?? "");
+      };
+
+      const buildRunModalInputs = () => {
+        const inputs = {};
+        const errors = {};
+        for (const spec of runInputFieldSpecs()) {
+          const value = state.runModalInputValues[spec.key];
+          if (spec.required && isEmptyHumanValue(value)) {
+            errors[spec.key] = `${formatFieldLabel(spec.key === "value" ? "input" : spec.key)} is required.`;
+            continue;
+          }
+          if (!spec.required && isEmptyHumanValue(value)) continue;
+          try {
+            const coerced = coerceRunInputValue(spec, value);
+            if (spec.scalarRoot) inputs.value = coerced;
+            else inputs[spec.key] = coerced;
+          } catch (error) {
+            errors[spec.key] = `${formatFieldLabel(spec.key)} ${error.message}.`;
+          }
+        }
+        if (state.runModalWorkspacePath) {
+          inputs.workspacePath = state.runModalWorkspacePath;
+        }
+        state.runModalInputErrors = errors;
+        renderRunModalInputForm();
+        const firstError = Object.keys(errors)[0];
+        if (firstError) {
+          document.querySelector(`[data-run-input="${firstError}"]`)?.focus?.();
+          throw new Error("Complete the required workflow inputs.");
+        }
+        return inputs;
+      };
+
+      const runPromptFromInputs = (inputs = {}) => {
+        const value = inputs.prompt ?? inputs.message ?? inputs.request ?? "";
+        if (typeof value === "string") return value.trim();
+        return "";
+      };
+
+      const requiredInitialInputFields = (schema, provided = {}) => {
+        if (!isRecord(schema) || !Array.isArray(schema.required)) return [];
+        const available = new Set(["_loomexRunner"]);
+        if (isRecord(provided.inputs)) {
+          Object.entries(provided.inputs).forEach(([field, value]) => {
+            if (!isEmptyHumanValue(value)) available.add(field);
+          });
+        }
+        if (provided.prompt) {
+          available.add("prompt");
+          available.add("message");
+        }
+        if (provided.workspacePath) available.add("workspacePath");
+        if (Array.isArray(provided.selectedFiles) && provided.selectedFiles.length) {
+          available.add("selectedFiles");
+        }
+        return schema.required
+          .map(String)
+          .filter((field) => field && !available.has(field));
+      };
+
+      const initialInputRequiredMessage = (workflow, fields) => {
+        const list = fields.map(formatFieldLabel).join(", ");
+        return `${workflowName(workflow)} requires start input: ${list}. Use Run to choose a version and fill the start form.`;
+      };
+
+      const ensureWorkflowCanStartWithoutInitialInput = async (
+        workflow,
+        { workspacePath = null, selectedFiles = [], inputs = {}, prompt = "", version = null } = {},
+      ) => {
+        const schema = await loadWorkflowInputSchema(workflow.id, version);
+        const missing = requiredInitialInputFields(schema, {
+          workspacePath,
+          selectedFiles,
+          inputs,
+          prompt,
+        });
+        if (missing.length) {
+          throw new Error(initialInputRequiredMessage(workflow, missing));
+        }
+      };
+
+      const friendlyRunError = async (error, workflow, context = {}) => {
+        const message = error?.message || String(error || "");
+        if (!/422|validation|required|prompt|input/i.test(message)) return message;
+        const schema = await loadWorkflowInputSchema(workflow?.id, context.version || null);
+        const missing = requiredInitialInputFields(schema, context);
+        if (missing.length) return initialInputRequiredMessage(workflow, missing);
+        return message;
+      };
+
       const runWorkflow = async ({
         workflow,
-        prompt,
+        prompt = "",
+        inputs = {},
+        version = null,
         workspacePath = state.status?.workspacePath || null,
         selectedFiles = [],
         errorTarget = "composerError",
       }) => {
+        const requestInputs = isRecord(inputs) ? { ...inputs } : {};
         state.sending = true;
         $("send").disabled = true;
         clearTranscript();
-        appendMessage("user", prompt, workflowName(workflow));
+        if (prompt) {
+          appendMessage("user", prompt, workflowName(workflow));
+        }
         closeMentionMenu();
         try {
+          await ensureWorkflowCanStartWithoutInitialInput(workflow, {
+            workspacePath,
+            selectedFiles,
+            inputs: requestInputs,
+            prompt,
+            version,
+          });
           const response = await call("workflow_run_chat", {
             request: {
               profile: null,
               workflowId: workflow.id,
+              version,
+              inputs: requestInputs,
               prompt,
               selectedFiles,
               workspacePath,
@@ -4008,15 +5690,23 @@
               ...execution,
               id: executionId,
               workflowId: workflow.id,
-              input: { prompt },
+              humanRequest: response.result?.humanRequest || response.result?.human_request || execution.humanRequest,
+              input: { ...requestInputs, prompt: requestInputs.prompt ?? prompt },
             },
             true,
           );
           await pollExecution(executionId);
           await call("approval_list").catch(() => null);
         } catch (error) {
-          appendMessage("system", error.message, "Error");
-          setError(errorTarget, error.message);
+          const message = await friendlyRunError(error, workflow, {
+            workspacePath,
+            selectedFiles,
+            inputs: requestInputs,
+            prompt,
+            version,
+          });
+          appendMessage("system", message, "Error");
+          setError(errorTarget, message);
         } finally {
           state.sending = false;
           $("send").disabled = false;
@@ -4217,11 +5907,23 @@
           if (result.selected && result.path) {
             state.runModalWorkspacePath = result.path;
             $("runWorkspacePath").textContent = result.path;
+            setError("runModalError", "");
           } else {
             await call("workspace_picker_cancel", { request: { profile: null } });
           }
         } catch (error) {
           setError("runModalError", error.message);
+        }
+      });
+      $("runVersionSelect").addEventListener("change", () => {
+        const workflow = state.workflows.find((item) => item.id === state.runModalWorkflowId);
+        state.runModalVersion = $("runVersionSelect").value;
+        state.runModalInputErrors = {};
+        setError("runModalError", "");
+        if (workflow) {
+          loadRunModalInputSchema(workflow, state.runModalVersion).catch((error) => {
+            setError("runModalError", error.message);
+          });
         }
       });
       $("runConfirm").addEventListener("click", async () => {
@@ -4234,21 +5936,29 @@
           setError("runModalError", "Choose a workspace directory");
           return;
         }
+        const version = String(state.runModalVersion || "").trim();
+        if (!version && state.runModalVersions.length) {
+          setError("runModalError", "Choose a workflow version");
+          return;
+        }
         setError("runModalError", "");
         $("runConfirm").disabled = true;
         try {
           const workspacePath = state.runModalWorkspacePath;
+          const inputs = buildRunModalInputs();
+          $("runConfirm").disabled = true;
           await persistWorkspace(workspacePath);
           closeRunModal();
           state.selectedWorkflowId = workflow.id;
           state.selectedRunId = null;
           renderWorkflowList();
           renderSelectedWorkflow();
-          const prompt = $("composer").value.trim() || `Run ${workflowName(workflow)}`;
-          $("composer").value = "";
+          const prompt = runPromptFromInputs(inputs);
           await runWorkflow({
             workflow,
             prompt,
+            inputs,
+            version: version || null,
             workspacePath,
             selectedFiles: [],
             errorTarget: "composerError",
@@ -4282,6 +5992,7 @@
         state.selectedWorkflowId = null;
         state.selectedRunId = null;
         state.currentExecution = null;
+        setActiveHumanRequest(null);
         $("transcript").innerHTML = "";
         await refreshStatus();
       });
@@ -4344,6 +6055,10 @@
 
       $("composerForm").addEventListener("submit", async (event) => {
         event.preventDefault();
+        if (state.pendingHumanRequest) {
+          await resolveHumanInput();
+          return;
+        }
         if (!state.sending) await sendMessage();
       });
 

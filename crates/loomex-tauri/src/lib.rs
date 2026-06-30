@@ -15,11 +15,11 @@ use loomex_core::{
     ApprovalPolicySnapshot, ApprovalPrompt, ApprovalPromptProvider, ApprovalRegistry,
     ApprovalRequest, ApprovalStatus, CliConfig, CliConfigOverrides, CoreError, CoreResult,
     CreateApprovalRequestInput, CredentialStorageBackend, CredentialStore, DeviceLoginChallenge,
-    HttpManagementApiClient, LogEntry, ManagementApiClient, ManagementCredential,
-    ManagementProjectRunnerBinding, Organization, Project, ProjectRunnerBindingCreateRequest,
-    ResolvedCliSettings, RunnerRuntimeGuard, RunnerStateMachine, RunnerUpsertRequest,
-    RunnerWorkflowExecutionListResponse, RunnerWorkflowExecutionResponse, RunnerWorkflowSummary,
-    SystemCredentialStore,
+    HttpManagementApiClient, HumanRequestResolveResponse, HumanRequestSummary, LogEntry,
+    ManagementApiClient, ManagementCredential, ManagementProjectRunnerBinding, Organization,
+    Project, ProjectRunnerBindingCreateRequest, ResolvedCliSettings, RunnerRuntimeGuard,
+    RunnerStateMachine, RunnerUpsertRequest, RunnerWorkflowExecutionListResponse,
+    RunnerWorkflowExecutionResponse, RunnerWorkflowSummary, SystemCredentialStore,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -37,8 +37,11 @@ const WORKSPACE_FILE_READ_SCHEMA: &str = "loomex.tauri.workspaceFileRead/v1";
 const TERMINAL_COMMAND_SCHEMA: &str = "loomex.tauri.terminalCommand/v1";
 const WORKFLOW_LIST_SCHEMA: &str = "loomex.tauri.workflowList/v1";
 const WORKFLOW_RUN_LIST_SCHEMA: &str = "loomex.tauri.workflowRunList/v1";
+const WORKFLOW_INPUT_SCHEMA_SCHEMA: &str = "loomex.tauri.workflowInputSchema/v1";
 const WORKFLOW_RUN_CHAT_SCHEMA: &str = "loomex.tauri.workflowRunChat/v1";
 const WORKFLOW_RUN_DETAIL_SCHEMA: &str = "loomex.tauri.workflowRunDetail/v1";
+const HUMAN_REQUEST_LIST_SCHEMA: &str = "loomex.tauri.humanRequestList/v1";
+const HUMAN_REQUEST_RESOLVE_SCHEMA: &str = "loomex.tauri.humanRequestResolve/v1";
 const APPROVALS_SCHEMA: &str = "loomex.tauri.approvals/v1";
 const APPROVAL_DECISION_SCHEMA: &str = "loomex.tauri.approvalDecision/v1";
 const LIVE_LOGS_SCHEMA: &str = "loomex.tauri.liveLogs/v1";
@@ -297,10 +300,39 @@ pub struct MacWorkflowRunListResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkflowInputSchemaRequest {
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub workflow_id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacWorkflowInputSchemaResponse {
+    pub schema_version: String,
+    pub workflow_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_version: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_version: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowRunChatRequest {
     #[serde(default)]
     pub profile: Option<String>,
     pub workflow_id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub inputs: serde_json::Map<String, serde_json::Value>,
     pub prompt: String,
     #[serde(default)]
     pub selected_files: Vec<String>,
@@ -332,6 +364,44 @@ pub struct WorkflowRunDetailRequest {
 pub struct MacWorkflowRunDetailResponse {
     pub schema_version: String,
     pub result: RunnerWorkflowExecutionResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanRequestListRequest {
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub workflow_id: String,
+    #[serde(default)]
+    pub execution_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacHumanRequestListResponse {
+    pub schema_version: String,
+    pub workflow_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    pub human_requests: Vec<HumanRequestSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanRequestResolveRequest {
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub request_id: String,
+    #[serde(default = "default_human_request_action")]
+    pub action: String,
+    pub answer: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacHumanRequestResolveResponse {
+    pub schema_version: String,
+    pub result: HumanRequestResolveResponse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1004,9 +1074,8 @@ impl MacApp {
                 "select a file, not a directory",
             ));
         }
-        let content = fs::read_to_string(&file_path).map_err(|err| {
-            CoreError::new("TAURI_WORKSPACE_FILE_READ_FAILED", err.to_string())
-        })?;
+        let content = fs::read_to_string(&file_path)
+            .map_err(|err| CoreError::new("TAURI_WORKSPACE_FILE_READ_FAILED", err.to_string()))?;
         let relative_path = file_path
             .strip_prefix(&canonical_path)
             .unwrap_or(&file_path)
@@ -1103,6 +1172,49 @@ impl MacApp {
         })
     }
 
+    pub fn workflow_input_schema(
+        &self,
+        request: WorkflowInputSchemaRequest,
+    ) -> CoreResult<MacWorkflowInputSchemaResponse> {
+        let resolved = self.load_resolved(request.profile)?;
+        let store = SystemCredentialStore::new(self.paths.credential_dir.clone());
+        let credential = load_credential_from_store(&store, &resolved.profile)?;
+        let mut client =
+            HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())?;
+        self.workflow_input_schema_with(
+            request.workflow_id,
+            request.version,
+            &credential,
+            &mut client,
+        )
+    }
+
+    pub fn workflow_input_schema_with<C: ManagementApiClient>(
+        &self,
+        workflow_id: String,
+        version: Option<String>,
+        credential: &ManagementCredential,
+        client: &mut C,
+    ) -> CoreResult<MacWorkflowInputSchemaResponse> {
+        let workflow_id = workflow_id.trim();
+        if workflow_id.is_empty() {
+            return Err(CoreError::new(
+                "TAURI_WORKFLOW_REQUIRED",
+                "workflow id is required",
+            ));
+        }
+        let detail =
+            client.get_runner_workflow_input_schema(credential, workflow_id, version.as_deref())?;
+        Ok(MacWorkflowInputSchemaResponse {
+            schema_version: WORKFLOW_INPUT_SCHEMA_SCHEMA.to_string(),
+            workflow_id: workflow_id.to_string(),
+            input_schema: detail.input_schema.filter(|schema| schema.is_object()),
+            active_version: detail.active_version,
+            selected_version: detail.selected_version,
+            versions: detail.versions,
+        })
+    }
+
     pub fn run_workflow_chat(
         &self,
         request: WorkflowRunChatRequest,
@@ -1133,34 +1245,40 @@ impl MacApp {
                 "choose a workflow before sending a message",
             ));
         }
-        if request.prompt.trim().is_empty() {
-            return Err(CoreError::new(
-                "TAURI_CHAT_PROMPT_REQUIRED",
-                "message is required",
-            ));
-        }
         let workspace_path = request
             .workspace_path
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .or(saved_workspace_path)
             .map(str::to_string);
-        let prompt = request.prompt;
-        let mut inputs = serde_json::json!({
-            "prompt": prompt.clone(),
-            "message": prompt,
-        });
+        let prompt = request.prompt.trim().to_string();
+        let mut inputs = request.inputs;
+        if !prompt.is_empty() {
+            inputs
+                .entry("prompt".to_string())
+                .or_insert_with(|| serde_json::Value::String(prompt.clone()));
+            inputs
+                .entry("message".to_string())
+                .or_insert_with(|| serde_json::Value::String(prompt));
+        }
         if let Some(workspace_path) = &workspace_path {
-            inputs["workspacePath"] = serde_json::Value::String(workspace_path.clone());
+            inputs.insert(
+                "workspacePath".to_string(),
+                serde_json::Value::String(workspace_path.clone()),
+            );
         }
         if !request.selected_files.is_empty() {
-            inputs["selectedFiles"] = serde_json::json!(request.selected_files);
+            inputs.insert(
+                "selectedFiles".to_string(),
+                serde_json::json!(request.selected_files),
+            );
         }
         let result = client.start_runner_workflow_execution(
             credential,
             &request.workflow_id,
-            inputs,
+            serde_json::Value::Object(inputs),
             request.session_id.as_deref(),
+            request.version.as_deref(),
         )?;
         Ok(MacWorkflowRunChatResponse {
             schema_version: WORKFLOW_RUN_CHAT_SCHEMA.to_string(),
@@ -1198,6 +1316,90 @@ impl MacApp {
         Ok(MacWorkflowRunDetailResponse {
             schema_version: WORKFLOW_RUN_DETAIL_SCHEMA.to_string(),
             result: client.get_runner_workflow_execution(credential, execution_id)?,
+        })
+    }
+
+    pub fn list_human_requests(
+        &self,
+        request: HumanRequestListRequest,
+    ) -> CoreResult<MacHumanRequestListResponse> {
+        let resolved = self.load_resolved(request.profile)?;
+        let store = SystemCredentialStore::new(self.paths.credential_dir.clone());
+        let credential = load_credential_from_store(&store, &resolved.profile)?;
+        let mut client =
+            HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())?;
+        self.list_human_requests_with(
+            request.workflow_id,
+            request.execution_id,
+            &credential,
+            &mut client,
+        )
+    }
+
+    pub fn list_human_requests_with<C: ManagementApiClient>(
+        &self,
+        workflow_id: String,
+        execution_id: Option<String>,
+        credential: &ManagementCredential,
+        client: &mut C,
+    ) -> CoreResult<MacHumanRequestListResponse> {
+        let workflow_id = workflow_id.trim();
+        if workflow_id.is_empty() {
+            return Err(CoreError::new(
+                "TAURI_WORKFLOW_REQUIRED",
+                "workflow id is required to list human requests",
+            ));
+        }
+        let execution_id = execution_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        Ok(MacHumanRequestListResponse {
+            schema_version: HUMAN_REQUEST_LIST_SCHEMA.to_string(),
+            workflow_id: workflow_id.to_string(),
+            execution_id: execution_id.clone(),
+            human_requests: client.list_human_requests(
+                credential,
+                workflow_id,
+                execution_id.as_deref(),
+            )?,
+        })
+    }
+
+    pub fn resolve_human_request(
+        &self,
+        request: HumanRequestResolveRequest,
+    ) -> CoreResult<MacHumanRequestResolveResponse> {
+        let resolved = self.load_resolved(request.profile.clone())?;
+        let store = SystemCredentialStore::new(self.paths.credential_dir.clone());
+        let credential = load_credential_from_store(&store, &resolved.profile)?;
+        let mut client =
+            HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())?;
+        self.resolve_human_request_with(request, &credential, &mut client)
+    }
+
+    pub fn resolve_human_request_with<C: ManagementApiClient>(
+        &self,
+        request: HumanRequestResolveRequest,
+        credential: &ManagementCredential,
+        client: &mut C,
+    ) -> CoreResult<MacHumanRequestResolveResponse> {
+        let request_id = request.request_id.trim();
+        if request_id.is_empty() {
+            return Err(CoreError::new(
+                "TAURI_HUMAN_REQUEST_REQUIRED",
+                "human request id is required",
+            ));
+        }
+        let action = request.action.trim();
+        let payload = serde_json::json!({
+            "action": if action.is_empty() { "submit" } else { action },
+            "answer": request.answer,
+        });
+        Ok(MacHumanRequestResolveResponse {
+            schema_version: HUMAN_REQUEST_RESOLVE_SCHEMA.to_string(),
+            result: client.resolve_human_request(credential, request_id, &payload)?,
         })
     }
 
@@ -1954,9 +2156,12 @@ pub fn tauri_builder() -> tauri::Builder<tauri::Wry> {
             commands::workspace_bind,
             commands::workspace_picker_cancel,
             commands::workflow_list,
+            commands::workflow_input_schema,
             commands::workflow_run_list,
             commands::workflow_run_chat,
             commands::workflow_run_detail,
+            commands::human_request_list,
+            commands::human_request_resolve,
             commands::runner_status,
             commands::runner_start,
             commands::runner_stop,
@@ -2149,6 +2354,14 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub fn workflow_input_schema(
+        state: State<'_, TauriAppState>,
+        request: WorkflowInputSchemaRequest,
+    ) -> Result<MacWorkflowInputSchemaResponse, TauriCommandError> {
+        state.app.workflow_input_schema(request).map_err(Into::into)
+    }
+
+    #[tauri::command]
     pub fn workflow_run_chat(
         state: State<'_, TauriAppState>,
         request: WorkflowRunChatRequest,
@@ -2170,6 +2383,22 @@ pub mod commands {
         request: WorkflowRunDetailRequest,
     ) -> Result<MacWorkflowRunDetailResponse, TauriCommandError> {
         state.app.workflow_run_detail(request).map_err(Into::into)
+    }
+
+    #[tauri::command]
+    pub fn human_request_list(
+        state: State<'_, TauriAppState>,
+        request: HumanRequestListRequest,
+    ) -> Result<MacHumanRequestListResponse, TauriCommandError> {
+        state.app.list_human_requests(request).map_err(Into::into)
+    }
+
+    #[tauri::command]
+    pub fn human_request_resolve(
+        state: State<'_, TauriAppState>,
+        request: HumanRequestResolveRequest,
+    ) -> Result<MacHumanRequestResolveResponse, TauriCommandError> {
+        state.app.resolve_human_request(request).map_err(Into::into)
     }
 
     #[tauri::command]
@@ -2807,6 +3036,10 @@ fn default_workflow_run_list_limit() -> usize {
     12
 }
 
+fn default_human_request_action() -> String {
+    "submit".to_string()
+}
+
 fn default_workspace_file_list_limit() -> usize {
     40
 }
@@ -3102,11 +3335,23 @@ mod tests {
         binding: Option<ManagementProjectRunnerBinding>,
         binding_error: Option<CoreError>,
         workflows: Vec<RunnerWorkflowSummary>,
+        runner_workflow_input_schema: Option<Value>,
+        runner_workflow_active_version: Option<Value>,
+        runner_workflow_selected_version: Option<Value>,
+        runner_workflow_versions: Vec<Value>,
         runner_execution_list_response: Option<RunnerWorkflowExecutionListResponse>,
         last_runner_workflow_id: Option<String>,
         last_runner_workflow_inputs: Option<Value>,
+        last_runner_workflow_execution_version: Option<String>,
+        last_runner_workflow_schema_version: Option<String>,
         runner_execution_response: Option<RunnerWorkflowExecutionResponse>,
         runner_execution_detail_response: Option<RunnerWorkflowExecutionResponse>,
+        human_requests: Vec<HumanRequestSummary>,
+        last_human_request_workflow_id: Option<String>,
+        last_human_request_execution_id: Option<String>,
+        last_human_request_id: Option<String>,
+        last_human_request_payload: Option<Value>,
+        human_request_resolve_response: Option<HumanRequestResolveResponse>,
     }
 
     impl ManagementApiClient for FakeManagementClient {
@@ -3290,9 +3535,11 @@ mod tests {
             workflow_id: &str,
             inputs: Value,
             _session_id: Option<&str>,
+            version: Option<&str>,
         ) -> CoreResult<RunnerWorkflowExecutionResponse> {
             self.last_runner_workflow_id = Some(workflow_id.to_string());
             self.last_runner_workflow_inputs = Some(inputs);
+            self.last_runner_workflow_execution_version = version.map(str::to_string);
             Ok(self.runner_execution_response.clone().unwrap_or_else(|| {
                 RunnerWorkflowExecutionResponse {
                     execution: serde_json::json!({
@@ -3356,6 +3603,21 @@ mod tests {
                 }))
         }
 
+        fn get_runner_workflow_input_schema(
+            &mut self,
+            _credential: &ManagementCredential,
+            _workflow_id: &str,
+            version: Option<&str>,
+        ) -> CoreResult<loomex_core::RunnerWorkflowInputSchemaResponse> {
+            self.last_runner_workflow_schema_version = version.map(str::to_string);
+            Ok(loomex_core::RunnerWorkflowInputSchemaResponse {
+                input_schema: self.runner_workflow_input_schema.clone(),
+                active_version: self.runner_workflow_active_version.clone(),
+                selected_version: self.runner_workflow_selected_version.clone(),
+                versions: self.runner_workflow_versions.clone(),
+            })
+        }
+
         fn get_workflow_input_schema(
             &mut self,
             _credential: &ManagementCredential,
@@ -3367,19 +3629,31 @@ mod tests {
         fn list_human_requests(
             &mut self,
             _credential: &ManagementCredential,
-            _workflow_id: &str,
-            _execution_id: Option<&str>,
+            workflow_id: &str,
+            execution_id: Option<&str>,
         ) -> CoreResult<Vec<HumanRequestSummary>> {
-            Ok(Vec::new())
+            self.last_human_request_workflow_id = Some(workflow_id.to_string());
+            self.last_human_request_execution_id = execution_id.map(str::to_string);
+            Ok(self.human_requests.clone())
         }
 
         fn resolve_human_request(
             &mut self,
             _credential: &ManagementCredential,
-            _request_id: &str,
-            _payload: &Value,
+            request_id: &str,
+            payload: &Value,
         ) -> CoreResult<HumanRequestResolveResponse> {
-            Err(CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+            self.last_human_request_id = Some(request_id.to_string());
+            self.last_human_request_payload = Some(payload.clone());
+            Ok(self
+                .human_request_resolve_response
+                .clone()
+                .unwrap_or_else(|| HumanRequestResolveResponse {
+                    request_id: request_id.to_string(),
+                    request_status: "resolved".to_string(),
+                    execution_id: Some("exec_123".to_string()),
+                    execution_status: Some("running".to_string()),
+                }))
         }
 
         fn issue_stream_credential(
@@ -3772,6 +4046,64 @@ mod tests {
     }
 
     #[test]
+    fn workflow_input_schema_uses_runner_control_detail() {
+        let home = temp_home("workflow-input-schema");
+        let app = app_for_home(&home);
+        let credential = credential("default", "org_123");
+        let mut client = FakeManagementClient {
+            runner_workflow_input_schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["prompt"],
+                "properties": {
+                    "prompt": { "type": "string" }
+                }
+            })),
+            runner_workflow_active_version: Some(serde_json::json!({
+                "versionNumber": 1
+            })),
+            runner_workflow_selected_version: Some(serde_json::json!({
+                "versionNumber": 2
+            })),
+            runner_workflow_versions: vec![
+                serde_json::json!({ "versionNumber": 2, "status": "archived" }),
+                serde_json::json!({ "versionNumber": 1, "status": "published", "isActive": true }),
+            ],
+            ..Default::default()
+        };
+
+        let response = app
+            .workflow_input_schema_with(
+                "wf_123".to_string(),
+                Some("2".to_string()),
+                &credential,
+                &mut client,
+            )
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(WORKFLOW_INPUT_SCHEMA_SCHEMA, response.schema_version);
+        assert_eq!("wf_123", response.workflow_id);
+        assert_eq!(
+            Some("2".to_string()),
+            client.last_runner_workflow_schema_version
+        );
+        assert_eq!(
+            2,
+            response.selected_version.as_ref().unwrap()["versionNumber"]
+        );
+        assert_eq!(2, response.versions.len());
+        assert_eq!(
+            Some("prompt"),
+            response
+                .input_schema
+                .as_ref()
+                .and_then(|schema| schema["required"].as_array())
+                .and_then(|required| required.first())
+                .and_then(|value| value.as_str())
+        );
+    }
+
+    #[test]
     fn workflow_run_chat_sends_prompt_and_workspace_to_runner_control() {
         let home = temp_home("workflow-run-chat");
         let app = app_for_home(&home);
@@ -3783,6 +4115,8 @@ mod tests {
                 WorkflowRunChatRequest {
                     profile: None,
                     workflow_id: "wf_123".to_string(),
+                    version: None,
+                    inputs: serde_json::Map::new(),
                     prompt: "Summarize this repo".to_string(),
                     selected_files: vec!["/Users/test/repo/src".to_string()],
                     workspace_path: Some("/Users/test/repo".to_string()),
@@ -3803,6 +4137,149 @@ mod tests {
         assert_eq!("/Users/test/repo", inputs["workspacePath"]);
         assert_eq!("/Users/test/repo/src", inputs["selectedFiles"][0]);
         assert_eq!("exec_123", response.result.execution["id"]);
+    }
+
+    #[test]
+    fn workflow_run_chat_allows_empty_prompt_without_default_input() {
+        let home = temp_home("workflow-run-empty-chat");
+        let app = app_for_home(&home);
+        let credential = credential("default", "org_123");
+        let mut client = FakeManagementClient::default();
+
+        let response = app
+            .run_workflow_chat_with(
+                WorkflowRunChatRequest {
+                    profile: None,
+                    workflow_id: "wf_123".to_string(),
+                    version: None,
+                    inputs: serde_json::Map::new(),
+                    prompt: "".to_string(),
+                    selected_files: Vec::new(),
+                    workspace_path: Some("/Users/test/repo".to_string()),
+                    session_id: None,
+                },
+                None,
+                &credential,
+                &mut client,
+            )
+            .unwrap();
+        let inputs = client.last_runner_workflow_inputs.unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(WORKFLOW_RUN_CHAT_SCHEMA, response.schema_version);
+        assert!(inputs.get("prompt").is_none());
+        assert!(inputs.get("message").is_none());
+        assert_eq!("/Users/test/repo", inputs["workspacePath"]);
+    }
+
+    #[test]
+    fn workflow_run_chat_sends_explicit_schema_inputs_to_runner_control() {
+        let home = temp_home("workflow-run-explicit-inputs");
+        let app = app_for_home(&home);
+        let credential = credential("default", "org_123");
+        let mut client = FakeManagementClient::default();
+        let mut explicit_inputs = serde_json::Map::new();
+        explicit_inputs.insert("ticketId".to_string(), serde_json::json!(42));
+        explicit_inputs.insert(
+            "prompt".to_string(),
+            serde_json::Value::String("Build the audit endpoint".to_string()),
+        );
+
+        app.run_workflow_chat_with(
+            WorkflowRunChatRequest {
+                profile: None,
+                workflow_id: "wf_123".to_string(),
+                version: Some("2".to_string()),
+                inputs: explicit_inputs,
+                prompt: "".to_string(),
+                selected_files: Vec::new(),
+                workspace_path: Some("/Users/test/repo".to_string()),
+                session_id: None,
+            },
+            None,
+            &credential,
+            &mut client,
+        )
+        .unwrap();
+        let inputs = client.last_runner_workflow_inputs.unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!("Build the audit endpoint", inputs["prompt"]);
+        assert_eq!(42, inputs["ticketId"]);
+        assert_eq!("/Users/test/repo", inputs["workspacePath"]);
+        assert!(inputs.get("message").is_none());
+        assert_eq!(
+            Some("2".to_string()),
+            client.last_runner_workflow_execution_version
+        );
+    }
+
+    #[test]
+    fn human_request_list_uses_workflow_and_execution_scope() {
+        let home = temp_home("human-request-list");
+        let app = app_for_home(&home);
+        let credential = credential("default", "org_123");
+        let mut client = FakeManagementClient {
+            human_requests: vec![HumanRequestSummary {
+                id: "hr_123".to_string(),
+                status: "pending".to_string(),
+                title: "Review output".to_string(),
+                execution: Some(loomex_core::HumanRequestExecution {
+                    id: "exec_123".to_string(),
+                }),
+                description: "Provide review notes".to_string(),
+                blocking: true,
+                extra: Default::default(),
+            }],
+            ..Default::default()
+        };
+
+        let response = app
+            .list_human_requests_with(
+                "wf_123".to_string(),
+                Some("exec_123".to_string()),
+                &credential,
+                &mut client,
+            )
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(HUMAN_REQUEST_LIST_SCHEMA, response.schema_version);
+        assert_eq!("wf_123", client.last_human_request_workflow_id.unwrap());
+        assert_eq!("exec_123", client.last_human_request_execution_id.unwrap());
+        assert_eq!("hr_123", response.human_requests[0].id);
+    }
+
+    #[test]
+    fn human_request_resolve_sends_action_and_answer_payload() {
+        let home = temp_home("human-request-resolve");
+        let app = app_for_home(&home);
+        let credential = credential("default", "org_123");
+        let mut client = FakeManagementClient::default();
+
+        let response = app
+            .resolve_human_request_with(
+                HumanRequestResolveRequest {
+                    profile: None,
+                    request_id: "hr_123".to_string(),
+                    action: "submit".to_string(),
+                    answer: serde_json::json!({
+                        "approved": true,
+                        "notes": "Ready"
+                    }),
+                },
+                &credential,
+                &mut client,
+            )
+            .unwrap();
+        let payload = client.last_human_request_payload.unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(HUMAN_REQUEST_RESOLVE_SCHEMA, response.schema_version);
+        assert_eq!("hr_123", client.last_human_request_id.unwrap());
+        assert_eq!("submit", payload["action"]);
+        assert_eq!(true, payload["answer"]["approved"]);
+        assert_eq!("Ready", payload["answer"]["notes"]);
     }
 
     #[test]
