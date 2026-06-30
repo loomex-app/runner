@@ -321,6 +321,12 @@
           "markdownDescription": "Allows the mac app to export a redacted support diagnostics bundle."
         },
         {
+          "description": "Allows the mac app to run short terminal commands in the selected workspace.",
+          "type": "string",
+          "const": "allow-terminal-command",
+          "markdownDescription": "Allows the mac app to run short terminal commands in the selected workspace."
+        },
+        {
           "description": "Allows the mac app to list runner-control workflows available to the authenticated runner.",
           "type": "string",
           "const": "allow-workflow-list",
@@ -355,6 +361,12 @@
           "type": "string",
           "const": "allow-workspace-file-list",
           "markdownDescription": "Allows the mac app to list files under the selected workspace for composer mentions."
+        },
+        {
+          "description": "Allows the mac app to read files under the selected workspace for the file tab.",
+          "type": "string",
+          "const": "allow-workspace-file-read",
+          "markdownDescription": "Allows the mac app to read files under the selected workspace for the file tab."
         },
         {
           "description": "Allows the mac app to open the native directory picker and return the selected workspace path or an explicit cancel result.",

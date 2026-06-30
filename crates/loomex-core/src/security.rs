@@ -394,7 +394,7 @@ mod tests {
         let policy = NetworkSecurityPolicy::enterprise_restricted(vec!["example.com".to_string()]);
 
         policy
-            .validate_url(&Url::parse("https://api.example.com/health").unwrap())
+            .validate_url(&Url::parse("https://www.example.com/health").unwrap())
             .unwrap();
     }
 

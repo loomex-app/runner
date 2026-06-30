@@ -3,7 +3,10 @@ use std::{
     env, fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 use loomex_core::{
@@ -30,6 +33,8 @@ const BINDING_SCHEMA: &str = "loomex.tauri.binding/v1";
 const WORKSPACE_PICKER_SCHEMA: &str = "loomex.tauri.workspacePicker/v1";
 const WORKSPACE_SET_SCHEMA: &str = "loomex.tauri.workspaceSet/v1";
 const WORKSPACE_FILE_LIST_SCHEMA: &str = "loomex.tauri.workspaceFileList/v1";
+const WORKSPACE_FILE_READ_SCHEMA: &str = "loomex.tauri.workspaceFileRead/v1";
+const TERMINAL_COMMAND_SCHEMA: &str = "loomex.tauri.terminalCommand/v1";
 const WORKFLOW_LIST_SCHEMA: &str = "loomex.tauri.workflowList/v1";
 const WORKFLOW_RUN_LIST_SCHEMA: &str = "loomex.tauri.workflowRunList/v1";
 const WORKFLOW_RUN_CHAT_SCHEMA: &str = "loomex.tauri.workflowRunChat/v1";
@@ -218,6 +223,44 @@ pub struct MacWorkspaceFileListResponse {
     pub schema_version: String,
     pub workspace_path: String,
     pub entries: Vec<WorkspaceFileEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileReadRequest {
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacWorkspaceFileReadResponse {
+    pub schema_version: String,
+    pub workspace_path: String,
+    pub path: String,
+    pub relative_path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCommandRequest {
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacTerminalCommandResponse {
+    pub schema_version: String,
+    pub workspace_path: String,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -926,6 +969,78 @@ impl MacApp {
             workspace_path: canonical_path.to_string_lossy().to_string(),
             entries,
         })
+    }
+
+    pub fn read_workspace_file(
+        &self,
+        request: WorkspaceFileReadRequest,
+    ) -> CoreResult<MacWorkspaceFileReadResponse> {
+        let resolved = self.load_resolved(request.profile)?;
+        let workspace_path = resolved.workspace_path.ok_or_else(|| {
+            CoreError::new(
+                "TAURI_WORKSPACE_REQUIRED",
+                "choose a working directory before opening files",
+            )
+        })?;
+        let canonical_path = canonical_workspace_path(&workspace_path)?;
+        let requested_path = PathBuf::from(request.path.trim());
+        let absolute_path = if requested_path.is_absolute() {
+            requested_path
+        } else {
+            canonical_path.join(requested_path)
+        };
+        let file_path = absolute_path
+            .canonicalize()
+            .map_err(|err| CoreError::new("TAURI_WORKSPACE_FILE_READ_FAILED", err.to_string()))?;
+        if !file_path.starts_with(&canonical_path) {
+            return Err(CoreError::new(
+                "TAURI_WORKSPACE_FILE_OUTSIDE_ROOT",
+                "requested file is outside the selected workspace",
+            ));
+        }
+        if file_path.is_dir() {
+            return Err(CoreError::new(
+                "TAURI_WORKSPACE_FILE_IS_DIRECTORY",
+                "select a file, not a directory",
+            ));
+        }
+        let content = fs::read_to_string(&file_path).map_err(|err| {
+            CoreError::new("TAURI_WORKSPACE_FILE_READ_FAILED", err.to_string())
+        })?;
+        let relative_path = file_path
+            .strip_prefix(&canonical_path)
+            .unwrap_or(&file_path)
+            .to_string_lossy()
+            .to_string();
+        Ok(MacWorkspaceFileReadResponse {
+            schema_version: WORKSPACE_FILE_READ_SCHEMA.to_string(),
+            workspace_path: canonical_path.to_string_lossy().to_string(),
+            path: file_path.to_string_lossy().to_string(),
+            relative_path,
+            content,
+        })
+    }
+
+    pub fn run_terminal_command(
+        &self,
+        request: TerminalCommandRequest,
+    ) -> CoreResult<MacTerminalCommandResponse> {
+        let command = request.command.trim();
+        if command.is_empty() {
+            return Err(CoreError::new(
+                "TAURI_TERMINAL_COMMAND_EMPTY",
+                "enter a terminal command first",
+            ));
+        }
+        let resolved = self.load_resolved(request.profile)?;
+        let workspace_path = resolved.workspace_path.ok_or_else(|| {
+            CoreError::new(
+                "TAURI_WORKSPACE_REQUIRED",
+                "choose a working directory before opening the terminal",
+            )
+        })?;
+        let canonical_path = canonical_workspace_path(&workspace_path)?;
+        run_terminal_command_in_workspace(&canonical_path, command)
     }
 
     pub fn list_workflows(
@@ -1833,6 +1948,8 @@ pub fn tauri_builder() -> tauri::Builder<tauri::Wry> {
             commands::project_select,
             commands::workspace_pick_directory,
             commands::workspace_file_list,
+            commands::workspace_file_read,
+            commands::terminal_command,
             commands::workspace_set,
             commands::workspace_bind,
             commands::workspace_picker_cancel,
@@ -1978,6 +2095,22 @@ pub mod commands {
         request: WorkspaceFileListRequest,
     ) -> Result<MacWorkspaceFileListResponse, TauriCommandError> {
         state.app.list_workspace_files(request).map_err(Into::into)
+    }
+
+    #[tauri::command]
+    pub fn workspace_file_read(
+        state: State<'_, TauriAppState>,
+        request: WorkspaceFileReadRequest,
+    ) -> Result<MacWorkspaceFileReadResponse, TauriCommandError> {
+        state.app.read_workspace_file(request).map_err(Into::into)
+    }
+
+    #[tauri::command]
+    pub fn terminal_command(
+        state: State<'_, TauriAppState>,
+        request: TerminalCommandRequest,
+    ) -> Result<MacTerminalCommandResponse, TauriCommandError> {
+        state.app.run_terminal_command(request).map_err(Into::into)
     }
 
     #[tauri::command]
@@ -2355,6 +2488,54 @@ fn list_workspace_file_entries(
     });
     entries.truncate(limit);
     Ok(entries)
+}
+
+fn run_terminal_command_in_workspace(
+    workspace: &Path,
+    command: &str,
+) -> CoreResult<MacTerminalCommandResponse> {
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let mut child = Command::new(shell)
+        .arg("-lc")
+        .arg(command)
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| CoreError::new("TAURI_TERMINAL_SPAWN_FAILED", err.to_string()))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() >= deadline => {
+                timed_out = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(40)),
+            Err(err) => {
+                return Err(CoreError::new(
+                    "TAURI_TERMINAL_WAIT_FAILED",
+                    err.to_string(),
+                ));
+            }
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|err| CoreError::new("TAURI_TERMINAL_OUTPUT_FAILED", err.to_string()))?;
+    Ok(MacTerminalCommandResponse {
+        schema_version: TERMINAL_COMMAND_SCHEMA.to_string(),
+        workspace_path: workspace.to_string_lossy().to_string(),
+        command: command.to_string(),
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        timed_out,
+    })
 }
 
 fn collect_workspace_file_entries(
@@ -3475,6 +3656,68 @@ mod tests {
     }
 
     #[test]
+    fn workspace_file_read_returns_content_from_selected_workspace() {
+        let home = temp_home("workspace-file-read");
+        let workspace = home.join("repo");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("README.md"), b"# Hello\nWorld").unwrap();
+        let app = app_for_home(&home);
+        let mut config = CliConfig::default();
+        app.set_workspace_with(
+            WorkspaceSetRequest {
+                profile: Some("default".to_string()),
+                workspace_path: workspace.to_string_lossy().to_string(),
+            },
+            &mut config,
+        )
+        .unwrap();
+
+        let response = app
+            .read_workspace_file(WorkspaceFileReadRequest {
+                profile: Some("default".to_string()),
+                path: "README.md".to_string(),
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(WORKSPACE_FILE_READ_SCHEMA, response.schema_version);
+        assert_eq!("README.md", response.relative_path);
+        assert_eq!("# Hello\nWorld", response.content);
+    }
+
+    #[test]
+    fn terminal_command_runs_inside_selected_workspace() {
+        let home = temp_home("terminal-command");
+        let workspace = home.join("repo");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("marker.txt"), b"ready").unwrap();
+        let app = app_for_home(&home);
+        let mut config = CliConfig::default();
+        app.set_workspace_with(
+            WorkspaceSetRequest {
+                profile: Some("default".to_string()),
+                workspace_path: workspace.to_string_lossy().to_string(),
+            },
+            &mut config,
+        )
+        .unwrap();
+
+        let response = app
+            .run_terminal_command(TerminalCommandRequest {
+                profile: Some("default".to_string()),
+                command: "pwd; cat marker.txt".to_string(),
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(TERMINAL_COMMAND_SCHEMA, response.schema_version);
+        assert_eq!(Some(0), response.exit_code);
+        assert!(!response.timed_out);
+        assert!(response.stdout.contains("repo"));
+        assert!(response.stdout.contains("ready"));
+    }
+
+    #[test]
     fn workflow_list_uses_runner_control_workflows() {
         let home = temp_home("workflow-list");
         let app = app_for_home(&home);
@@ -4229,6 +4472,8 @@ mod tests {
             "project_select",
             "workspace_pick_directory",
             "workspace_file_list",
+            "workspace_file_read",
+            "terminal_command",
             "workspace_set",
             "workspace_bind",
             "workspace_picker_cancel",
@@ -4264,6 +4509,9 @@ mod tests {
             "allow-project-list",
             "allow-project-select",
             "allow-workspace-pick-directory",
+            "allow-workspace-file-list",
+            "allow-workspace-file-read",
+            "allow-terminal-command",
             "allow-workspace-set",
             "allow-workspace-bind",
             "allow-workspace-picker-cancel",

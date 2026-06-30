@@ -54,6 +54,16 @@ description = "Allows the mac app to list files under the selected workspace for
 commands.allow = ["workspace_file_list"]
 
 [[permission]]
+identifier = "allow-workspace-file-read"
+description = "Allows the mac app to read files under the selected workspace for the file tab."
+commands.allow = ["workspace_file_read"]
+
+[[permission]]
+identifier = "allow-terminal-command"
+description = "Allows the mac app to run short terminal commands in the selected workspace."
+commands.allow = ["terminal_command"]
+
+[[permission]]
 identifier = "allow-workspace-bind"
 description = "Allows the mac app to bind a selected local workspace to a project."
 commands.allow = ["workspace_bind"]

@@ -31,6 +31,7 @@
         --sidebar-width: 292px;
         --nav-rail-width: 44px;
         --content-width: 720px;
+        --tools-panel-width: clamp(360px, 33vw, 560px);
       }
 
       * {
@@ -194,17 +195,32 @@
         height: 100vh;
         min-height: 0;
         display: grid;
-        grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0;
+        grid-template-rows: minmax(0, 1fr) 0;
         min-width: 0;
         overflow: hidden;
       }
 
       .shell.nav-collapsed {
-        grid-template-columns: minmax(0, 1fr);
+        grid-template-columns: minmax(0, 1fr) 0;
+      }
+
+      .shell.tools-open {
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--tools-panel-width);
+      }
+
+      .shell.nav-collapsed.tools-open {
+        grid-template-columns: minmax(0, 1fr) var(--tools-panel-width);
+      }
+
+      .shell.workflow-open {
+        grid-template-rows: minmax(0, 1fr) minmax(240px, min(46vh, 420px));
       }
 
       .sidebar {
         position: relative;
+        grid-column: 1;
+        grid-row: 1 / -1;
         min-width: 0;
         min-height: 0;
         display: grid;
@@ -806,13 +822,19 @@
       }
 
       .main {
+        grid-column: 2;
+        grid-row: 1;
         min-width: 0;
-        height: 100vh;
+        height: auto;
         min-height: 0;
         display: grid;
         grid-template-rows: minmax(0, 1fr) auto;
         overflow: hidden;
         background: var(--bg);
+      }
+
+      .shell.nav-collapsed .main {
+        grid-column: 1;
       }
 
       .toolbar {
@@ -1362,22 +1384,379 @@
         height: 16px;
       }
 
-      .empty-nav-panel {
-        position: fixed;
-        top: 52px;
-        left: 16px;
-        bottom: 18px;
-        z-index: 55;
+      .launcher-panel {
+        position: relative;
+        grid-column: 3;
+        grid-row: 1;
+        z-index: 2;
         display: none;
-        width: 260px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        place-items: center;
+        padding: 72px 18px 64px;
+        border-left: 1px solid rgba(255, 255, 255, 0.1);
+        background: #151617;
+        color: var(--text);
+      }
+
+      .launcher-panel.open {
+        display: grid;
+      }
+
+      .shell.nav-collapsed .launcher-panel {
+        grid-column: 2;
+      }
+
+      .launcher-actions {
+        width: min(100%, 720px);
+        display: grid;
+        gap: 6px;
+        align-content: center;
+      }
+
+      .tools-panel-resizer {
+        position: absolute;
+        top: 0;
+        left: -5px;
+        bottom: 0;
+        z-index: 3;
+        width: 10px;
+        cursor: col-resize;
+        touch-action: none;
+      }
+
+      .tools-panel-resizer::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 4px;
+        bottom: 0;
+        width: 1px;
+        background: transparent;
+      }
+
+      .tools-panel-resizer:hover::after,
+      body.resizing-tools-panel .tools-panel-resizer::after {
+        background: rgba(245, 247, 248, 0.22);
+      }
+
+      .launcher-option {
+        min-height: 44px;
+        display: grid;
+        grid-template-columns: 20px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        border-color: transparent;
+        border-radius: 8px;
+        background: rgba(20, 21, 23, 0.98);
+        color: rgba(245, 247, 248, 0.86);
+        text-align: left;
+        padding: 8px 12px;
+      }
+
+      .launcher-option:hover {
+        border-color: transparent;
+        background: #202124;
+        color: var(--text);
+      }
+
+      .launcher-option svg {
+        width: 16px;
+        height: 16px;
+        color: rgba(245, 247, 248, 0.68);
+      }
+
+      .launcher-shortcut {
+        min-height: 22px;
+        display: inline-flex;
+        align-items: center;
+        padding: 1px 7px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        color: rgba(245, 247, 248, 0.66);
+        font-size: 12px;
+      }
+
+      .dock-head {
+        min-height: 54px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .dock-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .dock-close {
+        width: 28px;
+        min-width: 28px;
+        min-height: 28px;
+        padding: 0;
+        border-color: transparent;
+        background: transparent;
+      }
+
+      .file-filter {
+        padding: 12px 12px 6px;
+      }
+
+      .file-filter input {
+        min-height: 36px;
+        border-radius: 10px;
+        background: #202124;
+      }
+
+      .file-tree {
+        min-height: 0;
+        overflow: auto;
+        display: grid;
+        align-content: start;
+        gap: 2px;
+        padding: 4px 10px 14px;
+      }
+
+      .file-row {
+        min-height: 30px;
+        display: grid;
+        grid-template-columns: 18px minmax(0, 1fr);
+        align-items: center;
+        gap: 8px;
+        border-color: transparent;
+        background: transparent;
+        text-align: left;
+        color: rgba(245, 247, 248, 0.82);
+      }
+
+      .file-row:hover {
+        border-color: transparent;
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .workspace-surface {
+        position: relative;
+        grid-column: 3;
+        grid-row: 1;
+        z-index: 2;
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        min-height: 0;
+        height: auto;
+        display: none;
+        grid-template-rows: 58px 52px minmax(0, 1fr);
+        border-left: 1px solid rgba(255, 255, 255, 0.1);
+        background: var(--bg);
+      }
+
+      .workspace-surface.open {
+        display: grid;
+      }
+
+      .shell.nav-collapsed .workspace-surface {
+        grid-column: 2;
+      }
+
+      .workspace-tabs {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 16px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .workspace-tab {
+        min-height: 36px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        max-width: 240px;
+        border-color: transparent;
+        border-radius: 10px;
+        background: transparent;
+        color: rgba(245, 247, 248, 0.62);
+        padding: 7px 12px;
+      }
+
+      .workspace-tab.active {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+      }
+
+      .workspace-tab span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tab-add {
+        width: 32px;
+        min-width: 32px;
+        min-height: 32px;
+        padding: 0;
+        border-color: transparent;
+        background: transparent;
+        color: rgba(245, 247, 248, 0.62);
+      }
+
+      .tab-add:hover {
+        border-color: transparent;
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+      }
+
+      .tab-add-menu {
+        position: fixed;
+        z-index: 70;
+        display: none;
+        width: 220px;
+        padding: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 14px;
-        background: rgba(38, 39, 42, 0.96);
+        background: #2d2d2e;
         box-shadow: var(--shadow);
       }
 
-      .empty-nav-panel.open {
-        display: block;
+      .tab-add-menu.open {
+        display: grid;
+      }
+
+      .workspace-pathbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 18px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        color: rgba(245, 247, 248, 0.72);
+        font-size: 14px;
+      }
+
+      .workspace-body {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(170px, 34%);
+      }
+
+      .workspace-content {
+        min-height: 0;
+        overflow: auto;
+        display: grid;
+        align-content: start;
+        padding: 36px 36px 80px;
+        border-right: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .file-empty {
+        align-self: center;
+        justify-self: center;
+        display: grid;
+        justify-items: center;
+        gap: 10px;
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .file-empty svg {
+        width: 34px;
+        height: 34px;
+      }
+
+      .file-document {
+        max-width: 760px;
+        display: grid;
+        gap: 18px;
+        color: #f2f2f2;
+        font-size: 16px;
+        line-height: 1.55;
+      }
+
+      .file-document h1,
+      .file-document h2,
+      .file-document h3 {
+        margin: 0;
+        line-height: 1.15;
+      }
+
+      .file-document h1 {
+        font-size: 34px;
+      }
+
+      .file-document h2 {
+        margin-top: 14px;
+        font-size: 26px;
+      }
+
+      .file-document p,
+      .file-document ol,
+      .file-document ul {
+        margin: 0;
+      }
+
+      .file-document code {
+        padding: 1px 6px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.12);
+        font-family:
+          "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      .file-document pre {
+        border-radius: 10px;
+        background: #2d2d2e;
+      }
+
+      .file-raw {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .terminal-output {
+        min-height: 0;
+        overflow: auto;
+        padding: 14px 16px;
+        color: #d6d8dc;
+        font-family:
+          "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+
+      .terminal-form {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px 12px;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .terminal-prompt {
+        color: #dd7bdc;
+        font-family:
+          "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      .terminal-form input {
+        min-height: 34px;
+        border: 0;
+        background: transparent;
+        color: var(--text);
+        font-family:
+          "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        outline: none;
       }
 
       .artifacts-popover {
@@ -1406,23 +1785,24 @@
       }
 
       .workflow-panel {
-        position: fixed;
-        left: 50%;
-        bottom: 132px;
-        z-index: 50;
+        position: relative;
+        grid-column: 2 / -1;
+        grid-row: 2;
+        z-index: 1;
         display: none;
-        width: min(720px, calc(100vw - 72px));
-        transform: translateX(-50%);
-        padding: 14px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 16px;
-        background: rgba(32, 33, 36, 0.96);
-        box-shadow: var(--shadow);
+        grid-template-rows: auto minmax(0, 1fr);
+        min-height: 0;
+        padding: 0 14px 14px;
+        border-top: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(19, 20, 22, 0.98);
       }
 
       .workflow-panel.open {
         display: grid;
-        gap: 12px;
+      }
+
+      .shell.nav-collapsed .workflow-panel {
+        grid-column: 1 / -1;
       }
 
       .workflow-panel-head {
@@ -1430,21 +1810,56 @@
         align-items: center;
         justify-content: space-between;
         gap: 12px;
+        min-height: 48px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         color: var(--muted);
         font-size: 12px;
       }
 
-      .workflow-graph {
-        display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
+      .workflow-panel-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        min-width: 0;
+      }
+
+      .workflow-panel-title strong {
+        color: var(--text);
+        font-size: 13px;
+        letter-spacing: 0;
+      }
+
+      .workflow-panel-actions {
+        display: inline-flex;
+        align-items: center;
         gap: 8px;
       }
 
+      .workflow-panel-actions .icon {
+        width: 30px;
+        min-width: 30px;
+        min-height: 30px;
+      }
+
+      .workflow-panel-body {
+        min-height: 0;
+        overflow: auto;
+        padding: 12px 0 0;
+      }
+
+      .workflow-graph {
+        width: min(760px, calc(100vw - 28px));
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 8px;
+        margin: 0 auto;
+      }
+
       .workflow-node {
-        min-height: 54px;
+        min-height: 74px;
         display: grid;
         place-items: center;
-        padding: 8px;
+        padding: 10px;
         border: 1px solid var(--border);
         border-radius: 10px;
         background: #17191d;
@@ -1638,11 +2053,19 @@
 
       @media (max-width: 1140px) {
         .shell {
-          grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+          grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0;
         }
 
         .shell.nav-collapsed {
-          grid-template-columns: minmax(0, 1fr);
+          grid-template-columns: minmax(0, 1fr) 0;
+        }
+
+        .shell.tools-open {
+          grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--tools-panel-width);
+        }
+
+        .shell.nav-collapsed.tools-open {
+          grid-template-columns: minmax(0, 1fr) var(--tools-panel-width);
         }
       }
 
@@ -1653,13 +2076,31 @@
 
         .shell {
           grid-template-columns: 1fr;
+          grid-template-rows: auto minmax(0, 1fr) 0 0;
+          height: auto;
+          min-height: 100vh;
         }
 
         .shell.nav-collapsed {
           grid-template-columns: 1fr;
         }
 
+        .shell.tools-open {
+          grid-template-columns: 1fr;
+          grid-template-rows: auto minmax(0, 1fr) minmax(280px, 42vh) 0;
+        }
+
+        .shell.workflow-open {
+          grid-template-rows: auto minmax(0, 1fr) 0 minmax(240px, 42vh);
+        }
+
+        .shell.tools-open.workflow-open {
+          grid-template-rows: auto minmax(0, 1fr) minmax(280px, 38vh) minmax(220px, 34vh);
+        }
+
         .sidebar {
+          grid-column: 1;
+          grid-row: 1;
           position: relative;
           width: auto;
           transform: none;
@@ -1690,7 +2131,29 @@
         }
 
         .main {
+          grid-column: 1;
+          grid-row: 2;
           min-height: 70vh;
+        }
+
+        .launcher-panel,
+        .workspace-surface,
+        .shell.nav-collapsed .launcher-panel,
+        .shell.nav-collapsed .workspace-surface {
+          grid-column: 1;
+          grid-row: 3;
+          border-left: 0;
+          border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .tools-panel-resizer {
+          display: none;
+        }
+
+        .workflow-panel,
+        .shell.nav-collapsed .workflow-panel {
+          grid-column: 1;
+          grid-row: 4;
         }
 
         .toolbar {
@@ -1921,7 +2384,7 @@
 
         <section class="main" aria-label="Workflow chat">
           <div class="view-controls" aria-label="Panels">
-            <button id="emptyNavToggle" class="view-control" type="button" aria-label="Toggle left panel" aria-pressed="false">
+            <button id="sideNavToggle" class="view-control" type="button" aria-label="Toggle artifacts" aria-pressed="false">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M4 5h16" />
                 <path d="M4 12h10" />
@@ -1929,14 +2392,13 @@
                 <circle cx="18" cy="12" r="1" />
               </svg>
             </button>
-            <button id="workflowPanelToggle" class="view-control" type="button" aria-label="Toggle workflow graph" aria-pressed="false">
+            <button id="workflowPanelToggle" class="view-control" type="button" aria-label="Toggle workflow drawer" aria-pressed="false">
               <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 12h14" />
-                <path d="M5 6h14" />
-                <path d="M5 18h14" />
+                <rect x="4" y="7" width="16" height="10" rx="2" />
+                <path d="M8 17h8" />
               </svg>
             </button>
-            <button id="artifactsToggle" class="view-control" type="button" aria-label="Toggle artifacts" aria-pressed="false">
+            <button id="artifactsToggle" class="view-control" type="button" aria-label="Toggle side panel" aria-pressed="false">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M4 5h16v14H4z" />
                 <path d="M9 5v14" />
@@ -1999,14 +2461,68 @@
           </div>
         </section>
 
-        <aside id="emptyNavPanel" class="empty-nav-panel" aria-label="Left panel"></aside>
+        <section id="workspaceSurface" class="workspace-surface" aria-label="Workspace">
+          <div class="tools-panel-resizer" data-tools-panel-resizer aria-hidden="true"></div>
+          <div class="workspace-tabs">
+            <button id="fileTab" class="workspace-tab active" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /></svg>
+              <span id="fileTabTitle">Open file</span>
+            </button>
+            <button id="terminalTab" class="workspace-tab hidden" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 17 6-5-6-5" /><path d="M12 19h8" /></svg>
+              <span id="terminalTabTitle">Terminal</span>
+            </button>
+            <button id="tabAdd" class="tab-add" type="button" aria-label="New tab">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+            </button>
+          </div>
+          <div id="workspacePathbar" class="workspace-pathbar">/</div>
+          <div class="workspace-body">
+            <div id="workspaceContent" class="workspace-content"></div>
+            <aside class="workspace-files" aria-label="Workspace files">
+              <div class="file-filter">
+                <input id="fileFilter" type="search" placeholder="Filter files..." autocomplete="off" />
+              </div>
+              <div id="fileTree" class="file-tree" role="tree"></div>
+            </aside>
+          </div>
+        </section>
+
+        <div id="sideNavPanel" class="launcher-panel" aria-label="Launcher">
+          <div class="tools-panel-resizer" data-tools-panel-resizer aria-hidden="true"></div>
+          <div class="launcher-actions">
+            <button id="openFilesPanel" class="launcher-option" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+              <span>Files</span>
+              <span class="launcher-shortcut">⌘P</span>
+            </button>
+            <button id="openTerminalPanel" class="launcher-option" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 17 6-5-6-5" /><path d="M12 19h8" /></svg>
+              <span>Terminal</span>
+              <span></span>
+            </button>
+          </div>
+        </div>
+
+        <div id="tabAddMenu" class="tab-add-menu" aria-label="New tab menu">
+          <button id="addTerminalTab" class="launcher-option" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 17 6-5-6-5" /><path d="M12 19h8" /></svg>
+            <span>Terminal</span>
+            <span></span>
+          </button>
+        </div>
 
         <section id="workflowPanel" class="workflow-panel" aria-label="Workflow graph">
           <div class="workflow-panel-head">
-            <span>Workflow</span>
+            <span class="workflow-panel-title">
+              <span id="workflowPanelDot" class="status-dot ready" aria-hidden="true"></span>
+              <strong>Workflow</strong>
+            </span>
             <span id="workflowPanelStatus">Ready</span>
           </div>
-          <div id="workflowGraph" class="workflow-graph"></div>
+          <div class="workflow-panel-body">
+            <div id="workflowGraph" class="workflow-graph"></div>
+          </div>
         </section>
 
         <aside id="artifactsPopover" class="artifacts-popover" aria-label="Artifacts">
@@ -2078,6 +2594,11 @@
         workflowMenuId: null,
         runModalWorkflowId: null,
         runModalWorkspacePath: "",
+        fileEntries: [],
+        terminalRunning: false,
+        activeWorkspaceTab: "file",
+        selectedFile: null,
+        terminalLines: [],
       };
 
       const $ = (id) => document.getElementById(id);
@@ -2218,6 +2739,313 @@
 
       const setNotice = (message) => {
         $("appNotice").textContent = message || "";
+      };
+
+      let toolsPanelResize = null;
+
+      const clampToolsPanelWidth = (width) => {
+        const min = 320;
+        const sidebarWidth = $("chatView").classList.contains("nav-collapsed") ? 0 : parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width")) || 0;
+        const max = Math.max(min, window.innerWidth - sidebarWidth - 280);
+        return Math.min(max, Math.max(min, width));
+      };
+
+      const setToolsPanelWidth = (width) => {
+        document.documentElement.style.setProperty("--tools-panel-width", `${clampToolsPanelWidth(width)}px`);
+      };
+
+      const stopToolsPanelResize = () => {
+        toolsPanelResize = null;
+        document.body.classList.remove("resizing-tools-panel");
+        window.removeEventListener("pointermove", resizeToolsPanel);
+      };
+
+      const resizeToolsPanel = (event) => {
+        if (!toolsPanelResize) return;
+        setToolsPanelWidth(toolsPanelResize.startWidth + toolsPanelResize.startX - event.clientX);
+      };
+
+      const startToolsPanelResize = (event) => {
+        const panel = event.currentTarget.closest(".launcher-panel, .workspace-surface");
+        if (!panel) return;
+        event.preventDefault();
+        toolsPanelResize = {
+          startX: event.clientX,
+          startWidth: panel.getBoundingClientRect().width,
+        };
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        document.body.classList.add("resizing-tools-panel");
+        window.addEventListener("pointermove", resizeToolsPanel);
+        window.addEventListener("pointerup", stopToolsPanelResize, { once: true });
+      };
+
+      const closeToolsPanel = () => {
+        $("sideNavPanel").classList.remove("open");
+        $("workspaceSurface").classList.remove("open");
+        $("tabAddMenu").classList.remove("open");
+        $("chatView").classList.remove("tools-open");
+        setPressed("artifactsToggle", false);
+      };
+
+      const openToolsLauncher = () => {
+        $("workspaceSurface").classList.remove("open");
+        $("tabAddMenu").classList.remove("open");
+        $("chatView").classList.add("tools-open");
+        $("sideNavPanel").classList.add("open");
+        setPressed("artifactsToggle", true);
+      };
+
+      const openWorkspaceSurface = (tab = "file") => {
+        state.activeWorkspaceTab = tab;
+        $("sideNavPanel").classList.remove("open");
+        $("chatView").classList.add("tools-open");
+        $("workspaceSurface").classList.add("open");
+        setPressed("artifactsToggle", true);
+        $("fileTab").classList.toggle("active", tab === "file");
+        $("terminalTab").classList.toggle("active", tab === "terminal");
+        $("terminalTab").classList.toggle("hidden", !state.terminalLines.length && tab !== "terminal");
+        $("workspacePathbar").textContent = state.selectedFile?.relativePath || state.status?.workspacePath || "/";
+        renderWorkspaceContent();
+      };
+
+      const escapeHtml = (value) =>
+        String(value || "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;");
+
+      const renderMarkdownish = (content) => {
+        const lines = String(content || "").split("\n");
+        const html = [];
+        let listOpen = false;
+        let codeOpen = false;
+        for (const line of lines) {
+          if (line.startsWith("```")) {
+            html.push(codeOpen ? "</code></pre>" : "<pre><code>");
+            codeOpen = !codeOpen;
+            continue;
+          }
+          if (codeOpen) {
+            html.push(`${escapeHtml(line)}\n`);
+            continue;
+          }
+          const trimmed = line.trim();
+          if (!trimmed) {
+            if (listOpen) {
+              html.push("</ul>");
+              listOpen = false;
+            }
+            continue;
+          }
+          if (trimmed.startsWith("# ")) {
+            if (listOpen) {
+              html.push("</ul>");
+              listOpen = false;
+            }
+            html.push(`<h1>${escapeHtml(trimmed.slice(2))}</h1>`);
+          } else if (trimmed.startsWith("## ")) {
+            if (listOpen) {
+              html.push("</ul>");
+              listOpen = false;
+            }
+            html.push(`<h2>${escapeHtml(trimmed.slice(3))}</h2>`);
+          } else if (trimmed.startsWith("- ")) {
+            if (!listOpen) {
+              html.push("<ul>");
+              listOpen = true;
+            }
+            html.push(`<li>${escapeHtml(trimmed.slice(2))}</li>`);
+          } else {
+            if (listOpen) {
+              html.push("</ul>");
+              listOpen = false;
+            }
+            html.push(`<p>${escapeHtml(trimmed).replaceAll(/`([^`]+)`/g, "<code>$1</code>")}</p>`);
+          }
+        }
+        if (listOpen) html.push("</ul>");
+        if (codeOpen) html.push("</code></pre>");
+        return html.join("");
+      };
+
+      const renderWorkspaceContent = () => {
+        const content = $("workspaceContent");
+        content.innerHTML = "";
+        $("fileTabTitle").textContent = state.selectedFile?.name || "Open file";
+        $("terminalTab").classList.toggle("hidden", !state.terminalLines.length && state.activeWorkspaceTab !== "terminal");
+        $("fileTab").classList.toggle("active", state.activeWorkspaceTab === "file");
+        $("terminalTab").classList.toggle("active", state.activeWorkspaceTab === "terminal");
+        if (state.activeWorkspaceTab === "terminal") {
+          content.innerHTML = `
+            <div id="terminalOutput" class="terminal-output"></div>
+            <form id="terminalForm" class="terminal-form">
+              <span class="terminal-prompt">›</span>
+              <input id="terminalInput" autocomplete="off" spellcheck="false" aria-label="Terminal command" />
+            </form>
+          `;
+          const output = $("terminalOutput");
+          for (const line of state.terminalLines) {
+            const item = document.createElement("div");
+            item.textContent = line;
+            output.append(item);
+          }
+          output.scrollTop = output.scrollHeight;
+          $("terminalForm").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            await runTerminalCommand();
+          });
+          $("terminalInput").focus();
+          return;
+        }
+        if (!state.selectedFile) {
+          content.innerHTML = `
+            <div class="file-empty">
+              ${icons.folder}
+              <strong>Open file</strong>
+              <span>Select a file from the workspace tree</span>
+            </div>
+          `;
+          return;
+        }
+        const article = document.createElement("article");
+        const isMarkdown = /\.md(?:own)?$/i.test(state.selectedFile.relativePath || state.selectedFile.name || "");
+        article.className = isMarkdown ? "file-document" : "file-document file-raw";
+        if (isMarkdown) {
+          article.innerHTML = renderMarkdownish(state.selectedFile.content);
+        } else {
+          const pre = document.createElement("pre");
+          pre.className = "file-raw";
+          pre.textContent = state.selectedFile.content || "";
+          article.append(pre);
+        }
+        content.append(article);
+      };
+
+      const renderFileTree = () => {
+        const tree = $("fileTree");
+        const query = $("fileFilter").value.trim().toLowerCase();
+        tree.innerHTML = "";
+        const entries = state.fileEntries.filter((entry) => {
+          const text = `${entry.relativePath || ""} ${entry.name || ""}`.toLowerCase();
+          return !query || text.includes(query);
+        });
+        if (!entries.length) {
+          const empty = document.createElement("div");
+          empty.className = "meta";
+          empty.style.padding = "8px";
+          empty.textContent = state.status?.workspacePath ? "No files found" : "Choose a workspace first";
+          tree.append(empty);
+          return;
+        }
+        for (const entry of entries) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "file-row";
+          row.style.paddingLeft = `${8 + Math.min(5, (entry.relativePath || "").split("/").length - 1) * 14}px`;
+          row.innerHTML = `${entry.isDir ? icons.folder : icons.file}<span></span>`;
+          row.querySelector("span").textContent = entry.relativePath || entry.name;
+          row.title = entry.path;
+          if (!entry.isDir) {
+            row.addEventListener("click", () => openWorkspaceFile(entry));
+          }
+          tree.append(row);
+        }
+      };
+
+      const loadWorkspaceFiles = async () => {
+        const tree = $("fileTree");
+        tree.innerHTML = "<div class=\"meta\" style=\"padding: 8px\">Loading files...</div>";
+        try {
+          const response = await call("workspace_file_list", {
+            request: {
+              profile: null,
+              query: $("fileFilter").value,
+              limit: 80,
+            },
+          });
+          state.fileEntries = response.entries || [];
+          renderFileTree();
+        } catch (error) {
+          state.fileEntries = [];
+          tree.innerHTML = "";
+          const item = document.createElement("div");
+          item.className = "alert";
+          item.style.padding = "8px";
+          item.textContent = error.message;
+          tree.append(item);
+        }
+      };
+
+      const openFilesPanel = async () => {
+        openWorkspaceSurface("file");
+        $("fileFilter").focus();
+        await loadWorkspaceFiles();
+      };
+
+      const appendTerminalLine = (text, className = "") => {
+        state.terminalLines.push(text);
+        if (state.activeWorkspaceTab === "terminal") renderWorkspaceContent();
+      };
+
+      const openTerminalPanel = () => {
+        if (!state.terminalLines.length) {
+          appendTerminalLine(state.status?.workspacePath || "Workspace not set");
+        }
+        openWorkspaceSurface("terminal");
+      };
+
+      const openWorkspaceFile = async (entry) => {
+        try {
+          const response = await call("workspace_file_read", {
+            request: {
+              profile: null,
+              path: entry.path,
+            },
+          });
+          state.selectedFile = {
+            ...entry,
+            name: response.relativePath.split("/").pop() || entry.name,
+            relativePath: response.relativePath,
+            content: response.content,
+          };
+          $("workspacePathbar").textContent = response.relativePath;
+          openWorkspaceSurface("file");
+        } catch (error) {
+          setError("composerError", error.message);
+        }
+      };
+
+      const runTerminalCommand = async () => {
+        const input = $("terminalInput");
+        const command = input.value.trim();
+        if (!command || state.terminalRunning) return;
+        input.value = "";
+        state.terminalRunning = true;
+        input.disabled = true;
+        appendTerminalLine(`› ${command}`);
+        try {
+          const response = await call("terminal_command", {
+            request: {
+              profile: null,
+              command,
+            },
+          });
+          if (response.stdout) appendTerminalLine(response.stdout.trimEnd());
+          if (response.stderr) appendTerminalLine(response.stderr.trimEnd());
+          if (response.timedOut) appendTerminalLine("Command timed out after 30s");
+          else if (response.exitCode && response.exitCode !== 0) {
+            appendTerminalLine(`Exited with code ${response.exitCode}`);
+          }
+        } catch (error) {
+          appendTerminalLine(error.message);
+        } finally {
+          state.terminalRunning = false;
+          const nextInput = $("terminalInput");
+          if (nextInput) {
+            nextInput.disabled = false;
+            nextInput.focus();
+          }
+        }
       };
 
       const fileDisplayName = (entry) =>
@@ -2462,6 +3290,10 @@
         if (panelStatus) {
           panelStatus.textContent = run?.executionId ? statusLabel(status) : "Ready";
         }
+        const panelDot = $("workflowPanelDot");
+        if (panelDot) {
+          panelDot.className = `status-dot ${status === "ready" ? "ready" : status}`;
+        }
       };
 
       const workflowGraphNodes = [
@@ -2477,6 +3309,14 @@
         if (!graph) return;
         const outputs = execution?.output?.nodeOutputs || {};
         const status = cleanStatus(execution?.status || "ready");
+        const panelStatus = $("workflowPanelStatus");
+        if (panelStatus) {
+          panelStatus.textContent = execution?.id ? statusLabel(status) : "Ready";
+        }
+        const panelDot = $("workflowPanelDot");
+        if (panelDot) {
+          panelDot.className = `status-dot ${status === "ready" ? "ready" : status}`;
+        }
         const activeIndex = !execution
           ? -1
           : terminalExecutionStatuses.has(status)
@@ -3307,28 +4147,59 @@
         popover.classList.toggle("open", open);
         $("profileToggle").setAttribute("aria-expanded", String(open));
       });
-      $("emptyNavToggle").addEventListener("click", () => {
-        const panel = $("emptyNavPanel");
+      $("sideNavToggle").addEventListener("click", () => {
+        const panel = $("artifactsPopover");
         const open = !panel.classList.contains("open");
         panel.classList.toggle("open", open);
-        setPressed("emptyNavToggle", open);
+        setPressed("sideNavToggle", open);
+      });
+      $("openFilesPanel").addEventListener("click", () => {
+        openFilesPanel().catch((error) => setError("composerError", error.message));
+      });
+      $("openTerminalPanel").addEventListener("click", openTerminalPanel);
+      $("fileFilter").addEventListener("input", () => {
+        if (state.fileEntries.length) renderFileTree();
+        else loadWorkspaceFiles().catch(() => null);
+      });
+      $("fileTab").addEventListener("click", () => openWorkspaceSurface("file"));
+      $("terminalTab").addEventListener("click", () => openWorkspaceSurface("terminal"));
+      $("tabAdd").addEventListener("click", () => {
+        const menu = $("tabAddMenu");
+        const rect = $("tabAdd").getBoundingClientRect();
+        menu.style.left = `${rect.left}px`;
+        menu.style.top = `${rect.bottom + 6}px`;
+        menu.classList.toggle("open");
+      });
+      $("addTerminalTab").addEventListener("click", () => {
+        $("tabAddMenu").classList.remove("open");
+        openTerminalPanel();
+      });
+      document.querySelectorAll("[data-tools-panel-resizer]").forEach((resizer) => {
+        resizer.addEventListener("pointerdown", startToolsPanelResize);
       });
       $("workflowPanelToggle").addEventListener("click", () => {
         const panel = $("workflowPanel");
         const open = !panel.classList.contains("open");
         panel.classList.toggle("open", open);
+        $("chatView").classList.toggle("workflow-open", open);
         setPressed("workflowPanelToggle", open);
         if (open) renderWorkflowGraph(state.currentExecution);
       });
       $("artifactsToggle").addEventListener("click", () => {
-        const panel = $("artifactsPopover");
-        const open = !panel.classList.contains("open");
-        panel.classList.toggle("open", open);
-        setPressed("artifactsToggle", open);
+        const launcherOpen = $("sideNavPanel").classList.contains("open");
+        const workspaceOpen = $("workspaceSurface").classList.contains("open");
+        if (launcherOpen || workspaceOpen) {
+          closeToolsPanel();
+        } else {
+          openToolsLauncher();
+        }
       });
       document.addEventListener("click", (event) => {
         if (!$("workflowMenu").contains(event.target)) {
           closeWorkflowMenu();
+        }
+        if (!$("tabAddMenu").contains(event.target) && !$("tabAdd").contains(event.target)) {
+          $("tabAddMenu").classList.remove("open");
         }
       });
       $("workflowEdit").addEventListener("click", () => {
