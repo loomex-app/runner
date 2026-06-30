@@ -17,6 +17,8 @@
     "dialog:allow-open",
     "allow-workspace-pick-directory",
     "allow-workspace-file-list",
+    "allow-workspace-file-read",
+    "allow-terminal-command",
     "allow-workspace-set",
     "allow-workspace-bind",
     "allow-workspace-picker-cancel",
