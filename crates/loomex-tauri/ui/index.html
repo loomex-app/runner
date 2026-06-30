@@ -195,17 +195,32 @@
         height: 100vh;
         min-height: 0;
         display: grid;
-        grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0;
+        grid-template-rows: minmax(0, 1fr) 0;
         min-width: 0;
         overflow: hidden;
       }
 
       .shell.nav-collapsed {
-        grid-template-columns: minmax(0, 1fr);
+        grid-template-columns: minmax(0, 1fr) 0;
+      }
+
+      .shell.tools-open {
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--tools-panel-width);
+      }
+
+      .shell.nav-collapsed.tools-open {
+        grid-template-columns: minmax(0, 1fr) var(--tools-panel-width);
+      }
+
+      .shell.workflow-open {
+        grid-template-rows: minmax(0, 1fr) minmax(240px, min(46vh, 420px));
       }
 
       .sidebar {
         position: relative;
+        grid-column: 1;
+        grid-row: 1 / -1;
         min-width: 0;
         min-height: 0;
         display: grid;
@@ -807,13 +822,19 @@
       }
 
       .main {
+        grid-column: 2;
+        grid-row: 1;
         min-width: 0;
-        height: 100vh;
+        height: auto;
         min-height: 0;
         display: grid;
         grid-template-rows: minmax(0, 1fr) auto;
         overflow: hidden;
         background: var(--bg);
+      }
+
+      .shell.nav-collapsed .main {
+        grid-column: 1;
       }
 
       .toolbar {
@@ -1364,25 +1385,27 @@
       }
 
       .launcher-panel {
-        position: fixed;
-        top: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 55;
+        position: relative;
+        grid-column: 3;
+        grid-row: 1;
+        z-index: 2;
         display: none;
-        width: var(--tools-panel-width);
-        min-width: 320px;
-        max-width: calc(100vw - 280px);
+        width: auto;
+        min-width: 0;
+        max-width: none;
         place-items: center;
         padding: 72px 18px 64px;
         border-left: 1px solid rgba(255, 255, 255, 0.1);
         background: #151617;
-        box-shadow: var(--shadow);
         color: var(--text);
       }
 
       .launcher-panel.open {
         display: grid;
+      }
+
+      .shell.nav-collapsed .launcher-panel {
+        grid-column: 2;
       }
 
       .launcher-actions {
@@ -1520,25 +1543,27 @@
       }
 
       .workspace-surface {
-        position: fixed;
-        top: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 56;
-        width: var(--tools-panel-width);
-        min-width: 320px;
-        max-width: calc(100vw - 280px);
+        position: relative;
+        grid-column: 3;
+        grid-row: 1;
+        z-index: 2;
+        width: auto;
+        min-width: 0;
+        max-width: none;
         min-height: 0;
-        height: 100vh;
+        height: auto;
         display: none;
         grid-template-rows: 58px 52px minmax(0, 1fr);
         border-left: 1px solid rgba(255, 255, 255, 0.1);
         background: var(--bg);
-        box-shadow: var(--shadow);
       }
 
       .workspace-surface.open {
         display: grid;
+      }
+
+      .shell.nav-collapsed .workspace-surface {
+        grid-column: 2;
       }
 
       .workspace-tabs {
@@ -1760,28 +1785,24 @@
       }
 
       .workflow-panel {
-        position: fixed;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 50;
-        display: grid;
+        position: relative;
+        grid-column: 2 / -1;
+        grid-row: 2;
+        z-index: 1;
+        display: none;
         grid-template-rows: auto minmax(0, 1fr);
-        height: min(46vh, 420px);
-        min-height: 240px;
+        min-height: 0;
         padding: 0 14px 14px;
         border-top: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 18px 18px 0 0;
         background: rgba(19, 20, 22, 0.98);
-        box-shadow: var(--shadow);
-        transform: translateY(100%);
-        pointer-events: none;
-        transition: transform 220ms ease;
       }
 
       .workflow-panel.open {
-        transform: translateY(0);
-        pointer-events: auto;
+        display: grid;
+      }
+
+      .shell.nav-collapsed .workflow-panel {
+        grid-column: 1 / -1;
       }
 
       .workflow-panel-head {
@@ -2032,11 +2053,19 @@
 
       @media (max-width: 1140px) {
         .shell {
-          grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+          grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0;
         }
 
         .shell.nav-collapsed {
-          grid-template-columns: minmax(0, 1fr);
+          grid-template-columns: minmax(0, 1fr) 0;
+        }
+
+        .shell.tools-open {
+          grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--tools-panel-width);
+        }
+
+        .shell.nav-collapsed.tools-open {
+          grid-template-columns: minmax(0, 1fr) var(--tools-panel-width);
         }
       }
 
@@ -2047,13 +2076,31 @@
 
         .shell {
           grid-template-columns: 1fr;
+          grid-template-rows: auto minmax(0, 1fr) 0 0;
+          height: auto;
+          min-height: 100vh;
         }
 
         .shell.nav-collapsed {
           grid-template-columns: 1fr;
         }
 
+        .shell.tools-open {
+          grid-template-columns: 1fr;
+          grid-template-rows: auto minmax(0, 1fr) minmax(280px, 42vh) 0;
+        }
+
+        .shell.workflow-open {
+          grid-template-rows: auto minmax(0, 1fr) 0 minmax(240px, 42vh);
+        }
+
+        .shell.tools-open.workflow-open {
+          grid-template-rows: auto minmax(0, 1fr) minmax(280px, 38vh) minmax(220px, 34vh);
+        }
+
         .sidebar {
+          grid-column: 1;
+          grid-row: 1;
           position: relative;
           width: auto;
           transform: none;
@@ -2084,7 +2131,29 @@
         }
 
         .main {
+          grid-column: 1;
+          grid-row: 2;
           min-height: 70vh;
+        }
+
+        .launcher-panel,
+        .workspace-surface,
+        .shell.nav-collapsed .launcher-panel,
+        .shell.nav-collapsed .workspace-surface {
+          grid-column: 1;
+          grid-row: 3;
+          border-left: 0;
+          border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .tools-panel-resizer {
+          display: none;
+        }
+
+        .workflow-panel,
+        .shell.nav-collapsed .workflow-panel {
+          grid-column: 1;
+          grid-row: 4;
         }
 
         .toolbar {
@@ -2347,33 +2416,6 @@
             </div>
           </header>
 
-          <section id="workspaceSurface" class="workspace-surface" aria-label="Workspace">
-            <div class="tools-panel-resizer" data-tools-panel-resizer aria-hidden="true"></div>
-            <div class="workspace-tabs">
-              <button id="fileTab" class="workspace-tab active" type="button">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /></svg>
-                <span id="fileTabTitle">Open file</span>
-              </button>
-              <button id="terminalTab" class="workspace-tab hidden" type="button">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 17 6-5-6-5" /><path d="M12 19h8" /></svg>
-                <span id="terminalTabTitle">Terminal</span>
-              </button>
-              <button id="tabAdd" class="tab-add" type="button" aria-label="New tab">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
-              </button>
-            </div>
-            <div id="workspacePathbar" class="workspace-pathbar">/</div>
-            <div class="workspace-body">
-              <div id="workspaceContent" class="workspace-content"></div>
-              <aside class="workspace-files" aria-label="Workspace files">
-                <div class="file-filter">
-                  <input id="fileFilter" type="search" placeholder="Filter files..." autocomplete="off" />
-                </div>
-                <div id="fileTree" class="file-tree" role="tree"></div>
-              </aside>
-            </div>
-          </section>
-
           <div id="transcript" class="transcript" aria-live="polite"></div>
 
           <div class="composer-wrap">
@@ -2416,6 +2458,33 @@
               <div id="composerError" class="alert" role="alert" aria-live="assertive"></div>
               <div id="appNotice" class="alert notice" aria-live="polite"></div>
             </form>
+          </div>
+        </section>
+
+        <section id="workspaceSurface" class="workspace-surface" aria-label="Workspace">
+          <div class="tools-panel-resizer" data-tools-panel-resizer aria-hidden="true"></div>
+          <div class="workspace-tabs">
+            <button id="fileTab" class="workspace-tab active" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /></svg>
+              <span id="fileTabTitle">Open file</span>
+            </button>
+            <button id="terminalTab" class="workspace-tab hidden" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 17 6-5-6-5" /><path d="M12 19h8" /></svg>
+              <span id="terminalTabTitle">Terminal</span>
+            </button>
+            <button id="tabAdd" class="tab-add" type="button" aria-label="New tab">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+            </button>
+          </div>
+          <div id="workspacePathbar" class="workspace-pathbar">/</div>
+          <div class="workspace-body">
+            <div id="workspaceContent" class="workspace-content"></div>
+            <aside class="workspace-files" aria-label="Workspace files">
+              <div class="file-filter">
+                <input id="fileFilter" type="search" placeholder="Filter files..." autocomplete="off" />
+              </div>
+              <div id="fileTree" class="file-tree" role="tree"></div>
+            </aside>
           </div>
         </section>
 
@@ -2676,7 +2745,8 @@
 
       const clampToolsPanelWidth = (width) => {
         const min = 320;
-        const max = Math.max(min, window.innerWidth - 280);
+        const sidebarWidth = $("chatView").classList.contains("nav-collapsed") ? 0 : parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width")) || 0;
+        const max = Math.max(min, window.innerWidth - sidebarWidth - 280);
         return Math.min(max, Math.max(min, width));
       };
 
@@ -2713,12 +2783,14 @@
         $("sideNavPanel").classList.remove("open");
         $("workspaceSurface").classList.remove("open");
         $("tabAddMenu").classList.remove("open");
+        $("chatView").classList.remove("tools-open");
         setPressed("artifactsToggle", false);
       };
 
       const openToolsLauncher = () => {
         $("workspaceSurface").classList.remove("open");
         $("tabAddMenu").classList.remove("open");
+        $("chatView").classList.add("tools-open");
         $("sideNavPanel").classList.add("open");
         setPressed("artifactsToggle", true);
       };
@@ -2726,6 +2798,7 @@
       const openWorkspaceSurface = (tab = "file") => {
         state.activeWorkspaceTab = tab;
         $("sideNavPanel").classList.remove("open");
+        $("chatView").classList.add("tools-open");
         $("workspaceSurface").classList.add("open");
         setPressed("artifactsToggle", true);
         $("fileTab").classList.toggle("active", tab === "file");
@@ -4108,6 +4181,7 @@
         const panel = $("workflowPanel");
         const open = !panel.classList.contains("open");
         panel.classList.toggle("open", open);
+        $("chatView").classList.toggle("workflow-open", open);
         setPressed("workflowPanelToggle", open);
         if (open) renderWorkflowGraph(state.currentExecution);
       });
