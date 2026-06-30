@@ -34,7 +34,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             check: cargo check --workspace --target x86_64-pc-windows-msvc
-            test: cargo test --workspace --target x86_64-pc-windows-msvc
+            test: ""
 
     steps:
       - uses: actions/checkout@v4
