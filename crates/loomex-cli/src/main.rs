@@ -7671,6 +7671,7 @@ mod tests {
                 }),
                 description: "".to_string(),
                 blocking: true,
+                extra: Default::default(),
             }],
             ..Default::default()
         };
@@ -7727,6 +7728,7 @@ mod tests {
                 }),
                 description: "".to_string(),
                 blocking: true,
+                extra: Default::default(),
             }],
             ..Default::default()
         };
@@ -7784,6 +7786,7 @@ mod tests {
                     }),
                     description: "".to_string(),
                     blocking: true,
+                    extra: Default::default(),
                 },
                 HumanRequestSummary {
                     id: "human_new".to_string(),
@@ -7794,6 +7797,7 @@ mod tests {
                     }),
                     description: "".to_string(),
                     blocking: true,
+                    extra: Default::default(),
                 },
             ],
             ..Default::default()
@@ -8998,6 +9002,7 @@ mod tests {
             _workflow_id: &str,
             _inputs: Value,
             _session_id: Option<&str>,
+            _version: Option<&str>,
         ) -> loomex_core::CoreResult<loomex_core::RunnerWorkflowExecutionResponse> {
             Err(loomex_core::CoreError::new("TEST_UNIMPLEMENTED", "unused"))
         }
@@ -9010,6 +9015,20 @@ mod tests {
         ) -> loomex_core::CoreResult<loomex_core::RunnerWorkflowExecutionListResponse> {
             Ok(loomex_core::RunnerWorkflowExecutionListResponse {
                 executions: Vec::new(),
+            })
+        }
+
+        fn get_runner_workflow_input_schema(
+            &mut self,
+            _credential: &ManagementCredential,
+            _workflow_id: &str,
+            _version: Option<&str>,
+        ) -> loomex_core::CoreResult<loomex_core::RunnerWorkflowInputSchemaResponse> {
+            Ok(loomex_core::RunnerWorkflowInputSchemaResponse {
+                input_schema: None,
+                active_version: None,
+                selected_version: None,
+                versions: Vec::new(),
             })
         }
 

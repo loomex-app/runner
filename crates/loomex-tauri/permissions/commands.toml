@@ -84,6 +84,11 @@ description = "Allows the mac app to list runner-control workflows available to 
 commands.allow = ["workflow_list"]
 
 [[permission]]
+identifier = "allow-workflow-input-schema"
+description = "Allows the mac app to read a runner-control workflow input schema before starting an execution."
+commands.allow = ["workflow_input_schema"]
+
+[[permission]]
 identifier = "allow-workflow-run-chat"
 description = "Allows the mac app to start a runner-control workflow execution from a chat message."
 commands.allow = ["workflow_run_chat"]
@@ -97,6 +102,16 @@ commands.allow = ["workflow_run_list"]
 identifier = "allow-workflow-run-detail"
 description = "Allows the mac app to read runner-control workflow execution status for chat polling."
 commands.allow = ["workflow_run_detail"]
+
+[[permission]]
+identifier = "allow-human-request-list"
+description = "Allows the mac app to list pending human input requests for a waiting workflow execution."
+commands.allow = ["human_request_list"]
+
+[[permission]]
+identifier = "allow-human-request-resolve"
+description = "Allows the mac app to submit a user answer and resume a waiting workflow execution."
+commands.allow = ["human_request_resolve"]
 
 [[permission]]
 identifier = "allow-runner-status"

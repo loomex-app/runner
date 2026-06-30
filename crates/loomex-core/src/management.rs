@@ -172,6 +172,8 @@ pub struct HumanRequestSummary {
     pub description: String,
     #[serde(default)]
     pub blocking: bool,
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -204,6 +206,18 @@ pub struct RunnerWorkflowExecutionResponse {
 pub struct RunnerWorkflowExecutionListResponse {
     #[serde(default)]
     pub executions: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunnerWorkflowInputSchemaResponse {
+    #[serde(default, rename = "inputSchema", alias = "input_schema")]
+    pub input_schema: Option<Value>,
+    #[serde(default, rename = "activeVersion", alias = "active_version")]
+    pub active_version: Option<Value>,
+    #[serde(default, rename = "selectedVersion", alias = "selected_version")]
+    pub selected_version: Option<Value>,
+    #[serde(default)]
+    pub versions: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,10 +268,19 @@ struct RunnerWorkflowListResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerHumanRequestListResponse {
+    #[serde(default)]
+    human_requests: Vec<HumanRequestSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RunnerWorkflowExecutionStartRequest {
     inputs: Value,
     #[serde(skip_serializing_if = "Option::is_none", rename = "sessionId")]
     session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -811,6 +834,7 @@ pub trait ManagementApiClient {
         workflow_id: &str,
         inputs: Value,
         session_id: Option<&str>,
+        version: Option<&str>,
     ) -> CoreResult<RunnerWorkflowExecutionResponse>;
     fn list_runner_workflow_executions(
         &mut self,
@@ -818,6 +842,12 @@ pub trait ManagementApiClient {
         workflow_id: &str,
         limit: usize,
     ) -> CoreResult<RunnerWorkflowExecutionListResponse>;
+    fn get_runner_workflow_input_schema(
+        &mut self,
+        credential: &ManagementCredential,
+        workflow_id: &str,
+        version: Option<&str>,
+    ) -> CoreResult<RunnerWorkflowInputSchemaResponse>;
     fn get_runner_workflow_execution(
         &mut self,
         credential: &ManagementCredential,
@@ -1232,6 +1262,7 @@ impl ManagementApiClient for HttpManagementApiClient {
         workflow_id: &str,
         inputs: Value,
         session_id: Option<&str>,
+        version: Option<&str>,
     ) -> CoreResult<RunnerWorkflowExecutionResponse> {
         let response = self
             .post_with_auth(
@@ -1244,6 +1275,7 @@ impl ManagementApiClient for HttpManagementApiClient {
             .json(&RunnerWorkflowExecutionStartRequest {
                 inputs,
                 session_id: session_id.map(str::to_string),
+                version: version.map(str::to_string),
             })
             .send()
             .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
@@ -1294,6 +1326,29 @@ impl ManagementApiClient for HttpManagementApiClient {
         Ok(envelope.data)
     }
 
+    fn get_runner_workflow_input_schema(
+        &mut self,
+        credential: &ManagementCredential,
+        workflow_id: &str,
+        version: Option<&str>,
+    ) -> CoreResult<RunnerWorkflowInputSchemaResponse> {
+        let mut path = format!(
+            "/runner-control/runner/v1/workflows/{}/",
+            encode_path(workflow_id)
+        );
+        if let Some(version) = version.filter(|value| !value.trim().is_empty()) {
+            path.push_str("?version=");
+            path.push_str(&encode_query(version.trim()));
+        }
+        let response = self
+            .get_with_auth(&path, credential)
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerWorkflowInputSchemaResponse> =
+            parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
     fn get_workflow_input_schema(
         &mut self,
         credential: &ManagementCredential,
@@ -1320,11 +1375,22 @@ impl ManagementApiClient for HttpManagementApiClient {
         workflow_id: &str,
         execution_id: Option<&str>,
     ) -> CoreResult<Vec<HumanRequestSummary>> {
-        let mut query = format!("workflow_id={}", encode_query(workflow_id));
-        if let Some(execution_id) = execution_id {
-            query.push_str("&execution_id=");
-            query.push_str(&encode_query(execution_id));
+        if let Some(execution_id) = execution_id.filter(|value| !value.trim().is_empty()) {
+            let response = self
+                .get_with_auth(
+                    &format!(
+                        "/runner-control/runner/v1/executions/{}/human-requests/?status=pending",
+                        encode_path(execution_id.trim())
+                    ),
+                    credential,
+                )
+                .send()
+                .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+            let envelope: ClientEnvelope<RunnerHumanRequestListResponse> =
+                parse_json_response(response)?;
+            return Ok(envelope.data.human_requests);
         }
+        let query = format!("workflow_id={}", encode_query(workflow_id));
         let response = self
             .get_with_auth(&format!("/client/human-inbox/?{query}"), credential)
             .send()
@@ -1341,7 +1407,10 @@ impl ManagementApiClient for HttpManagementApiClient {
     ) -> CoreResult<HumanRequestResolveResponse> {
         let response = self
             .post_with_auth(
-                &format!("/client/human-inbox/{}/resolve/", encode_path(request_id)),
+                &format!(
+                    "/runner-control/runner/v1/human-requests/{}/resolve/",
+                    encode_path(request_id)
+                ),
                 credential,
             )
             .json(payload)

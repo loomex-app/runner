@@ -207,6 +207,18 @@
           "markdownDescription": "Allows the mac app to list pending local action approval dialogs."
         },
         {
+          "description": "Allows the mac app to list pending human input requests for a waiting workflow execution.",
+          "type": "string",
+          "const": "allow-human-request-list",
+          "markdownDescription": "Allows the mac app to list pending human input requests for a waiting workflow execution."
+        },
+        {
+          "description": "Allows the mac app to submit a user answer and resume a waiting workflow execution.",
+          "type": "string",
+          "const": "allow-human-request-resolve",
+          "markdownDescription": "Allows the mac app to submit a user answer and resume a waiting workflow execution."
+        },
+        {
           "description": "Allows the mac app to read redacted local runner live logs.",
           "type": "string",
           "const": "allow-live-logs",
@@ -325,6 +337,12 @@
           "type": "string",
           "const": "allow-terminal-command",
           "markdownDescription": "Allows the mac app to run short terminal commands in the selected workspace."
+        },
+        {
+          "description": "Allows the mac app to read a runner-control workflow input schema before starting an execution.",
+          "type": "string",
+          "const": "allow-workflow-input-schema",
+          "markdownDescription": "Allows the mac app to read a runner-control workflow input schema before starting an execution."
         },
         {
           "description": "Allows the mac app to list runner-control workflows available to the authenticated runner.",
