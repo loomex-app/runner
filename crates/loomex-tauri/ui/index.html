@@ -116,7 +116,7 @@
       }
 
       svg {
-        width: 18px;
+        width: 40px;
         height: 18px;
         stroke: currentColor;
         stroke-width: 2;
@@ -127,7 +127,7 @@
 
       label {
         display: grid;
-        gap: 7px;
+        gap: 0;
         color: var(--muted);
         font-size: 12px;
         font-weight: 600;
@@ -218,7 +218,7 @@
       }
 
       .shell.workflow-open {
-        grid-template-rows: minmax(0, 1fr) minmax(240px, min(46vh, 420px));
+        grid-template-rows: minmax(0, 1fr) 0;
       }
 
       .sidebar {
@@ -834,9 +834,10 @@
         height: auto;
         min-height: 0;
         display: grid;
-        grid-template-rows: minmax(0, 1fr) auto;
+        grid-template-rows: auto minmax(0, 1fr) auto auto;
         overflow: hidden;
         background: var(--bg);
+        position: relative;
       }
 
       .shell.nav-collapsed .main {
@@ -844,7 +845,15 @@
       }
 
       .toolbar {
-        display: none;
+        min-width: 0;
+        min-height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 12px 18px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(16, 18, 21, 0.94);
       }
 
       .toolbar-title {
@@ -865,6 +874,14 @@
         align-items: center;
         gap: 8px;
         min-width: 0;
+      }
+
+      .toolbar-right {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 10px;
       }
 
       .pill {
@@ -888,8 +905,129 @@
         grid-template-columns: minmax(0, var(--content-width));
         justify-content: center;
         align-content: start;
-        gap: 18px;
-        padding: 24px 18px;
+        gap: 8px;
+        padding: 18px 18px;
+      }
+
+      .node-rail {
+        position: fixed;
+        top: 50%;
+        left: calc(var(--sidebar-width) + 22px);
+        width: 18px;
+        max-height: min(54vh, 360px);
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 7px;
+        overflow: visible;
+        pointer-events: auto;
+        transform: translateY(-50%);
+        z-index: 8;
+      }
+
+      .shell.nav-collapsed .node-rail {
+        left: 19px;
+      }
+
+      .shell.nav-collapsed.nav-revealed .node-rail {
+        left: calc(var(--sidebar-width) + 22px);
+      }
+
+      .node-rail:empty {
+        display: none;
+      }
+
+      .node-rail-marker {
+        --marker-color: rgba(245, 247, 248, 0.22);
+        --marker-width: 12px;
+        position: relative;
+        width: 40px;
+        min-width: 0;
+        height: 7px;
+        min-height: 0;
+        flex: 0 0 7px;
+        box-sizing: border-box;
+        border: 0;
+        padding: 0;
+        background: transparent;
+        cursor: pointer;
+      }
+
+      .node-rail-marker.active {
+        --marker-color: rgba(245, 247, 248, 0.56);
+      }
+
+      .node-rail-marker.wave-center,
+      .node-rail-marker:focus-visible {
+        --marker-color: rgba(245, 247, 248, 0.86);
+        --marker-width: 28px;
+        background: transparent;
+      }
+
+      .node-rail-marker.wave-near {
+        --marker-color: rgba(245, 247, 248, 0.38);
+        --marker-width: 22px;
+      }
+
+      .node-rail-marker.wave-far {
+        --marker-color: rgba(245, 247, 248, 0.28);
+        --marker-width: 16px;
+      }
+
+      .node-rail-marker:focus-visible {
+        outline: none;
+      }
+
+      .node-rail-marker::before {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 0;
+        width: var(--marker-width);
+        height: 3px;
+        border-radius: 999px;
+        background: var(--marker-color);
+        transform: translateY(-50%);
+        transition:
+          background 140ms ease,
+          width 140ms ease;
+      }
+
+      .node-rail-marker:focus-visible::before {
+        box-shadow: 0 0 0 2px rgba(245, 247, 248, 0.3);
+      }
+
+      .node-rail-marker::after {
+        content: attr(data-node-label);
+        position: absolute;
+        left: calc(var(--marker-width) + 12px);
+        top: 50%;
+        min-width: 124px;
+        max-width: 260px;
+        padding: 8px 10px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        background: rgba(38, 38, 38, 0.96);
+        box-shadow: 0 18px 38px rgba(0, 0, 0, 0.32);
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 650;
+        line-height: 1.3;
+        opacity: 0;
+        pointer-events: none;
+        text-align: start;
+        transform: translateY(-50%) translateX(-4px);
+        transition:
+          opacity 120ms ease,
+          transform 120ms ease;
+        white-space: nowrap;
+        z-index: 20;
+      }
+
+      .node-rail-marker.wave-center::after,
+      .node-rail-marker:focus-visible::after {
+        opacity: 1;
+        transform: translateY(-50%) translateX(0);
       }
 
       .empty-state {
@@ -912,7 +1050,7 @@
       .message {
         max-width: 100%;
         display: grid;
-        gap: 8px;
+        gap: 4px;
         animation: message-in 180ms ease-out;
       }
 
@@ -928,6 +1066,14 @@
         width: 100%;
       }
 
+      .message.node + .message.node {
+        margin-top: 14px;
+      }
+
+      .message.node:has(.node-content:empty) + .message.node {
+        margin-top: 8px;
+      }
+
       .message-meta {
         display: flex;
         align-items: center;
@@ -939,20 +1085,49 @@
       .run-duration {
         justify-self: start;
         width: 100%;
-        display: flex;
-        align-items: center;
-        gap: 7px;
         padding-bottom: 10px;
         border-bottom: 1px solid var(--border);
         color: var(--muted);
         font-size: 13px;
       }
 
-      .run-duration::after {
+      .run-duration-details {
+        width: 100%;
+      }
+
+      .run-duration-summary {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        min-height: 32px;
+        cursor: pointer;
+        list-style: none;
+      }
+
+      .run-duration-summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .run-duration-summary::after {
         content: "›";
         color: var(--muted);
         font-size: 16px;
         line-height: 1;
+        transition: transform 160ms ease;
+      }
+
+      .run-duration-details[open] .run-duration-summary::after {
+        transform: rotate(90deg);
+      }
+
+      .run-duration-body {
+        display: grid;
+        gap: 12px;
+        padding: 10px 0 4px;
+      }
+
+      .run-duration-body:empty {
+        display: none;
       }
 
       .message.user .message-meta {
@@ -983,6 +1158,16 @@
         font-size: 14px;
       }
 
+      .bubble,
+      .node-step-text,
+      .tool-summary-body,
+      .human-context-row span,
+      .human-field-label span,
+      .human-input-title span,
+      .run-field-label span {
+        unicode-bidi: plaintext;
+      }
+
       .message.user .bubble {
         border-color: rgba(255, 255, 255, 0.08);
         border-radius: 16px;
@@ -995,6 +1180,19 @@
         border-color: transparent;
         background: transparent;
         padding: 0;
+        white-space: normal;
+      }
+
+      .message.node.technical {
+        width: auto;
+      }
+
+      .message.node.technical .node-header {
+        display: none;
+      }
+
+      .message.node.technical .node-card {
+        gap: 0;
       }
 
       .message.system .bubble {
@@ -1008,8 +1206,8 @@
 
       .node-card {
         display: grid;
-        gap: 12px;
-        padding-top: 2px;
+        gap: 4px;
+        padding-top: 0;
       }
 
       .node-header {
@@ -1017,6 +1215,7 @@
         align-items: center;
         justify-content: space-between;
         gap: 12px;
+        min-height: 24px;
       }
 
       .node-title {
@@ -1024,6 +1223,17 @@
         align-items: center;
         gap: 9px;
         min-width: 0;
+      }
+
+      .node-badge {
+        color: var(--faint);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 999px;
+        padding: 1px 6px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0;
+        text-transform: uppercase;
       }
 
       .node-title strong {
@@ -1043,6 +1253,213 @@
 
       .message.node.done .node-status {
         color: var(--green);
+      }
+
+      .node-work-details {
+        width: 100%;
+        color: var(--muted);
+        font-size: 13px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.11);
+        padding-bottom: 7px;
+      }
+
+      .node-work-summary {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        min-height: 24px;
+        cursor: pointer;
+        list-style: none;
+      }
+
+      .node-work-summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .node-work-summary::after {
+        content: "›";
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 1;
+        transition: transform 160ms ease;
+      }
+
+      .node-work-details[open] .node-work-summary::after {
+        transform: rotate(90deg);
+      }
+
+      .node-work-body {
+        display: grid;
+        gap: 10px;
+        padding: 14px 0 3px;
+      }
+
+      .node-work-body:empty {
+        display: none;
+      }
+
+      .node-step-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--faint);
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      .node-step-label::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: currentColor;
+      }
+
+      .node-step-text {
+        min-width: 0;
+        color: var(--text);
+        font-size: 14px;
+        line-height: 1.95;
+        font-weight: 400;
+        white-space: pre-wrap;
+        word-break: break-word;
+        text-align: start;
+      }
+
+      .node-message-row {
+        display: flex;
+        gap: 6px;
+        align-items: flex-start;
+      }
+
+      .node-message-row.assistant {
+        justify-content: flex-start;
+      }
+
+      .node-message-row.user {
+        justify-content: flex-start;
+      }
+
+      .node-message-bubble {
+        max-width: min(860px, 100%);
+        padding: 0;
+        background: transparent;
+      }
+
+      .node-message-row.user .node-message-bubble {
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: #f3f3f3;
+        padding: 0;
+      }
+
+      .node-message-row.assistant .node-message-bubble {
+        background: transparent;
+      }
+
+      .tool-summary-line {
+        justify-self: start;
+        width: 100%;
+        display: grid;
+        gap: 4px;
+        color: var(--muted);
+      }
+
+      .trace-node {
+        display: grid;
+        gap: 6px;
+      }
+
+      .trace-node-head {
+        color: rgba(245, 247, 248, 0.82);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .trace-node-tools {
+        display: grid;
+        gap: 5px;
+        padding-left: 2px;
+      }
+
+      .tool-summary-head {
+        width: fit-content;
+        max-width: 100%;
+        min-height: 24px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 2px 2px;
+        color: rgba(245, 247, 248, 0.58);
+        font-size: 13px;
+        cursor: pointer;
+        list-style: none;
+      }
+
+      .tool-summary-head::-webkit-details-marker {
+        display: none;
+      }
+
+      .tool-summary-icon {
+        width: 16px;
+        height: 16px;
+        display: inline-grid;
+        place-items: center;
+        color: rgba(245, 247, 248, 0.54);
+      }
+
+      .tool-summary-icon svg {
+        width: 16px;
+        height: 16px;
+      }
+
+      .tool-summary-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tool-summary-detail {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: rgba(245, 247, 248, 0.82);
+      }
+
+      .tool-summary-chevron {
+        color: var(--faint);
+        transition: transform 160ms ease;
+      }
+
+      .tool-summary-line[open] .tool-summary-chevron {
+        transform: rotate(90deg);
+      }
+
+      .tool-summary-body {
+        max-height: 260px;
+        overflow: auto;
+        margin-left: 25px;
+        padding: 2px 0 6px;
+        border-left: 0;
+        color: rgba(216, 222, 233, 0.84);
+        font-family: inherit;
+        font-size: 13px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .tool-summary-body div + div {
+        margin-top: 7px;
+      }
+
+      .node-step.failed .node-step-label,
+      .message.node.failed .node-status {
+        color: var(--rose);
       }
 
       .message.node.failed .node-status {
@@ -1067,6 +1484,16 @@
         align-items: center;
         gap: 8px;
         color: var(--muted);
+      }
+
+      .node-working-placeholder {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding-top: 2px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.7;
       }
 
       .thinking-dots {
@@ -1171,6 +1598,7 @@
         resize: none;
         color: #f2f2f2;
         font-size: 13px;
+        unicode-bidi: plaintext;
         line-height: 1.45;
       }
 
@@ -1519,6 +1947,7 @@
       .human-field select,
       .human-field textarea {
         background: #111315;
+        unicode-bidi: plaintext;
       }
 
       .human-field textarea {
@@ -1549,10 +1978,7 @@
       }
 
       .view-controls {
-        position: fixed;
-        top: 12px;
-        right: 18px;
-        z-index: 60;
+        position: static;
         display: inline-flex;
         align-items: center;
         gap: 8px;
@@ -1985,23 +2411,21 @@
 
       .workflow-panel {
         position: relative;
-        grid-column: 2 / -1;
-        grid-row: 2;
+        grid-column: 1;
+        grid-row: 4;
         z-index: 1;
         display: none;
         grid-template-rows: auto minmax(0, 1fr);
+        width: 100%;
+        height: clamp(180px, 38vh, 360px);
         min-height: 0;
-        padding: 0 14px 14px;
+        padding: 0 18px 14px;
         border-top: 1px solid rgba(255, 255, 255, 0.12);
         background: rgba(19, 20, 22, 0.98);
       }
 
       .workflow-panel.open {
         display: grid;
-      }
-
-      .shell.nav-collapsed .workflow-panel {
-        grid-column: 1 / -1;
       }
 
       .workflow-panel-head {
@@ -2355,6 +2779,7 @@
       .run-field textarea {
         min-height: 92px;
         resize: vertical;
+        unicode-bidi: plaintext;
       }
 
       .run-field-error {
@@ -2430,6 +2855,10 @@
       }
 
       @media (max-width: 1140px) {
+        .node-rail {
+          display: none !important;
+        }
+
         .shell {
           grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0;
         }
@@ -2469,11 +2898,11 @@
         }
 
         .shell.workflow-open {
-          grid-template-rows: auto minmax(0, 1fr) 0 minmax(240px, 42vh);
+          grid-template-rows: auto minmax(0, 1fr) 0 0;
         }
 
         .shell.tools-open.workflow-open {
-          grid-template-rows: auto minmax(0, 1fr) minmax(280px, 38vh) minmax(220px, 34vh);
+          grid-template-rows: auto minmax(0, 1fr) minmax(280px, 42vh) 0;
         }
 
         .sidebar {
@@ -2528,16 +2957,18 @@
           display: none;
         }
 
-        .workflow-panel,
-        .shell.nav-collapsed .workflow-panel {
+        .workflow-panel {
           grid-column: 1;
           grid-row: 4;
         }
 
         .toolbar {
-          grid-template-columns: 1fr;
           min-height: auto;
           padding: 12px 14px;
+        }
+
+        .toolbar-right {
+          flex-wrap: wrap;
         }
 
         .toolbar-actions,
@@ -2635,7 +3066,7 @@
 
       @media (max-height: 600px) {
         .main {
-          grid-template-rows: minmax(0, 1fr) auto;
+          grid-template-rows: auto minmax(0, 1fr) auto auto;
         }
 
         .toolbar {
@@ -2683,6 +3114,7 @@
       </main>
 
       <main id="chatView" class="shell hidden">
+        <nav id="nodeRail" class="node-rail" aria-label="Completed workflow nodes"></nav>
         <button id="navToggle" class="nav-toggle" type="button" aria-label="Hide navigation" aria-pressed="false">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 5h16v14H4z" />
@@ -2772,36 +3204,37 @@
         </aside>
 
         <section class="main" aria-label="Workflow chat">
-          <div class="view-controls" aria-label="Panels">
-            <button id="sideNavToggle" class="view-control" type="button" aria-label="Toggle artifacts" aria-pressed="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 5h16" />
-                <path d="M4 12h10" />
-                <path d="M4 19h16" />
-                <circle cx="18" cy="12" r="1" />
-              </svg>
-            </button>
-            <button id="workflowPanelToggle" class="view-control" type="button" aria-label="Toggle workflow drawer" aria-pressed="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="4" y="7" width="16" height="10" rx="2" />
-                <path d="M8 17h8" />
-              </svg>
-            </button>
-            <button id="artifactsToggle" class="view-control" type="button" aria-label="Toggle side panel" aria-pressed="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 5h16v14H4z" />
-                <path d="M9 5v14" />
-              </svg>
-            </button>
-          </div>
-
           <header class="toolbar">
             <div class="toolbar-title">
               <span id="runStatusDot" class="status-dot ready" aria-hidden="true"></span>
               <strong id="chatTitle">Select a workflow</strong>
             </div>
-            <div class="toolbar-actions">
-              <span id="runStatePill" class="pill">Ready</span>
+            <div class="toolbar-right">
+              <div class="toolbar-actions">
+                <span id="runStatePill" class="pill">Ready</span>
+              </div>
+              <div class="view-controls" aria-label="Panels">
+                <button id="sideNavToggle" class="view-control" type="button" aria-label="Toggle artifacts" aria-pressed="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 5h16" />
+                    <path d="M4 12h10" />
+                    <path d="M4 19h16" />
+                    <circle cx="18" cy="12" r="1" />
+                  </svg>
+                </button>
+                <button id="workflowPanelToggle" class="view-control" type="button" aria-label="Toggle workflow drawer" aria-pressed="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="4" y="7" width="16" height="10" rx="2" />
+                    <path d="M8 17h8" />
+                  </svg>
+                </button>
+                <button id="artifactsToggle" class="view-control" type="button" aria-label="Toggle side panel" aria-pressed="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 5h16v14H4z" />
+                    <path d="M9 5v14" />
+                  </svg>
+                </button>
+              </div>
             </div>
           </header>
 
@@ -2835,6 +3268,7 @@
                   <span class="hidden">Message</span>
                   <textarea
                     id="composer"
+                    dir="auto"
                     placeholder="Ask for follow-up changes"
                     aria-describedby="composerError"
                   ></textarea>
@@ -2863,6 +3297,19 @@
               <div id="appNotice" class="alert notice" aria-live="polite"></div>
             </form>
           </div>
+
+          <section id="workflowPanel" class="workflow-panel" aria-label="Workflow graph">
+            <div class="workflow-panel-head">
+              <span class="workflow-panel-title">
+                <span id="workflowPanelDot" class="status-dot ready" aria-hidden="true"></span>
+                <strong>Workflow</strong>
+              </span>
+              <span id="workflowPanelStatus">Ready</span>
+            </div>
+            <div class="workflow-panel-body">
+              <div id="workflowGraph" class="workflow-graph"></div>
+            </div>
+          </section>
         </section>
 
         <section id="workspaceSurface" class="workspace-surface" aria-label="Workspace">
@@ -2915,19 +3362,6 @@
             <span></span>
           </button>
         </div>
-
-        <section id="workflowPanel" class="workflow-panel" aria-label="Workflow graph">
-          <div class="workflow-panel-head">
-            <span class="workflow-panel-title">
-              <span id="workflowPanelDot" class="status-dot ready" aria-hidden="true"></span>
-              <strong>Workflow</strong>
-            </span>
-            <span id="workflowPanelStatus">Ready</span>
-          </div>
-          <div class="workflow-panel-body">
-            <div id="workflowGraph" class="workflow-graph"></div>
-          </div>
-        </section>
 
         <aside id="artifactsPopover" class="artifacts-popover" aria-label="Artifacts">
           <div class="section-title">Artifacts</div>
@@ -3029,11 +3463,16 @@
         humanJsonResponse: "{}",
         humanSubmitError: "",
         humanResolving: false,
+        humanComposerSignature: "",
+        resolvedHumanRequests: new Set(),
+        activePolls: new Set(),
+        durationTimer: null,
         fileEntries: [],
         terminalRunning: false,
         activeWorkspaceTab: "file",
         selectedFile: null,
         terminalLines: [],
+        completedRuns: new Set(),
       };
 
       const $ = (id) => document.getElementById(id);
@@ -3123,6 +3562,14 @@
           '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7Z" /></svg>',
         more:
           '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12h.01" /><path d="M19 12h.01" /><path d="M5 12h.01" /></svg>',
+        terminal:
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 17 6-5-6-5" /><path d="M12 19h8" /></svg>',
+        search:
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3-3" /></svg>',
+        fileRead:
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /></svg>',
+        fileWrite:
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>',
       };
 
       const call = async (command, args = {}) => {
@@ -3832,6 +4279,28 @@
         return state.status;
       };
 
+      const ensureLocalRunnerStarted = async () => {
+        const status = state.status || {};
+        if (!status.authenticated || !status.bindingId || !status.workspacePath) {
+          return status;
+        }
+        try {
+          state.status = await call("runner_start", { request: { profile: null } });
+          renderStatus();
+          return state.status;
+        } catch (error) {
+          await refreshStatus().catch(() => {});
+          const message = error?.message || String(error);
+          if (
+            !message.includes("TAURI_BINDING_REQUIRED") &&
+            !message.includes("TAURI_WORKSPACE_REQUIRED")
+          ) {
+            setError("composerError", message);
+          }
+          return state.status || status;
+        }
+      };
+
       const loadWorkflows = async () => {
         const response = await call("workflow_list", { request: { profile: null } });
         state.workflows = response.workflows || [];
@@ -3847,23 +4316,28 @@
 
       const loadWorkflowRunHistory = async () => {
         const workflowIds = state.workflows.map((workflow) => workflow.id).filter(Boolean);
-        for (const workflowId of workflowIds) {
-          try {
-            const response = await call("workflow_run_list", {
-              request: {
-                profile: null,
-                workflowId,
-                limit: 12,
-              },
-            });
-            const executions = response?.result?.executions || [];
-            const backendRuns = executions
-              .map((execution) => runFromExecution(execution, workflowId))
-              .filter(Boolean);
-            replaceRunsForWorkflow(workflowId, backendRuns);
-          } catch {
-            /* Keep local run cache when backend history is temporarily unavailable. */
-          }
+        const chunkSize = 4;
+        for (let index = 0; index < workflowIds.length; index += chunkSize) {
+          await Promise.all(
+            workflowIds.slice(index, index + chunkSize).map(async (workflowId) => {
+              try {
+                const response = await call("workflow_run_list", {
+                  request: {
+                    profile: null,
+                    workflowId,
+                    limit: 12,
+                  },
+                });
+                const executions = response?.result?.executions || [];
+                const backendRuns = executions
+                  .map((execution) => runFromExecution(execution, workflowId))
+                  .filter(Boolean);
+                replaceRunsForWorkflow(workflowId, backendRuns);
+              } catch {
+                /* Keep local run cache when backend history is temporarily unavailable. */
+              }
+            }),
+          );
         }
         saveLocalRuns();
       };
@@ -3954,6 +4428,7 @@
 
           const item = document.createElement("div");
           item.className = "workflow-item";
+          item.dataset.workflowId = workflow.id;
           item.setAttribute("role", "option");
           item.setAttribute("aria-pressed", String(workflow.id === state.selectedWorkflowId));
 
@@ -4018,6 +4493,8 @@
               const runButton = document.createElement("button");
               runButton.type = "button";
               runButton.className = "run-item";
+              runButton.dataset.workflowId = workflow.id;
+              runButton.dataset.executionId = run.executionId;
               runButton.setAttribute("aria-pressed", String(run.executionId === state.selectedRunId));
               const status = cleanStatus(run.status);
               runButton.innerHTML = `<span class="run-dot ${status}"></span><span class="run-text"><span class="run-title"></span><span class="run-meta"></span></span>`;
@@ -4033,6 +4510,15 @@
         }
       };
 
+      const updateWorkflowSelectionState = () => {
+        for (const item of $("workflowList").querySelectorAll(".workflow-item")) {
+          item.setAttribute("aria-pressed", String(item.dataset.workflowId === state.selectedWorkflowId));
+        }
+        for (const item of $("workflowList").querySelectorAll(".run-item")) {
+          item.setAttribute("aria-pressed", String(item.dataset.executionId === state.selectedRunId));
+        }
+      };
+
       const renderSelectedWorkflow = () => {
         const workflow = selectedWorkflow();
         $("selectedWorkflow").textContent = workflow
@@ -4042,14 +4528,16 @@
       };
 
       const selectWorkflow = (workflowId) => {
+        if (state.selectedWorkflowId === workflowId && !state.selectedRunId) return;
         state.selectedWorkflowId = workflowId;
         state.selectedRunId = null;
+        state.currentExecution = null;
         state.renderedNodes = new Set();
         state.selectedFiles = [];
         setActiveHumanRequest(null);
         renderMentionChips();
         closeMentionMenu();
-        renderWorkflowList();
+        updateWorkflowSelectionState();
         renderSelectedWorkflow();
         renderEmptyState();
         setRunChrome(null);
@@ -4072,10 +4560,26 @@
 
       const clearTranscript = () => {
         $("transcript").innerHTML = "";
+        $("nodeRail").innerHTML = "";
         state.renderedNodes = new Set();
+        state.completedRuns = new Set();
+        state.resolvedHumanRequests = new Set();
+        state.currentExecution = null;
+      };
+
+      const transcriptAtBottom = (threshold = 80) => {
+        const transcript = $("transcript");
+        return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight <= threshold;
+      };
+
+      const maybeScrollTranscriptToBottom = (wasAtBottom = transcriptAtBottom()) => {
+        if (!wasAtBottom) return;
+        const transcript = $("transcript");
+        transcript.scrollTop = transcript.scrollHeight;
       };
 
       const appendMessage = (role, text, meta = "") => {
+        const wasAtBottom = transcriptAtBottom();
         const item = document.createElement("article");
         item.className = `message ${role}`;
         const metaEl = document.createElement("div");
@@ -4083,14 +4587,280 @@
         metaEl.textContent = meta || (role === "user" ? "You" : "Loomex");
         const bubble = document.createElement("div");
         bubble.className = "bubble";
+        bubble.dir = "auto";
         bubble.textContent = text;
         item.append(metaEl, bubble);
         $("transcript").append(item);
-        $("transcript").scrollTop = $("transcript").scrollHeight;
+        maybeScrollTranscriptToBottom(wasAtBottom);
         return { item, metaEl, bubble };
       };
 
+      const aiTraceEventWorthRendering = (event) => {
+        const type = String(event?.type || "");
+        if (!type.includes("activity.log")) return true;
+        const raw = [
+          event.title,
+          event.message,
+          typeof event.content === "string" ? event.content : "",
+          typeof event.content?.text === "string" ? event.content.text : "",
+          typeof event.payload?.content === "string" ? event.payload.content : "",
+          typeof event.payload?.command === "string" ? event.payload.command : "",
+        ]
+          .filter(Boolean)
+          .join("\n")
+          .toLowerCase();
+        return /(\$\s|ran command|cargo\s|git\s|pnpm\s|npm\s|yarn\s|python\s|ruby\s|kubectl\s|docker\s|read file|file\.read|read a file|write file|file\.write|edited|searched|search files)/.test(raw);
+      };
+
+      const runtimeAiEvents = (execution) =>
+        (Array.isArray(execution?.events) ? execution.events : [])
+          .filter((event) => event && typeof event === "object")
+          .filter((event) => String(event.type || event.eventType || "").startsWith("workflow_runtime.ai."))
+          .slice()
+          .sort((left, right) => {
+            const leftTime = timestampMs(left.createdAt || left.created_at || left.timestamp) || 0;
+            const rightTime = timestampMs(right.createdAt || right.created_at || right.timestamp) || 0;
+            if (leftTime !== rightTime) return leftTime - rightTime;
+            return String(left.id || "").localeCompare(String(right.id || ""));
+          });
+
+      const aiTraceEvents = (execution) => {
+        const trace = execution?.aiTrace || execution?.ai_trace || {};
+        const traceEvents = (Array.isArray(trace.events) ? trace.events : [])
+          .filter((event) => event && typeof event === "object")
+          .filter(aiTraceEventWorthRendering);
+        return traceEvents
+          .slice()
+          .sort((left, right) => {
+            const leftTime = timestampMs(left.timestamp || left.createdAt || left.created_at) || 0;
+            const rightTime = timestampMs(right.timestamp || right.createdAt || right.created_at) || 0;
+            if (leftTime !== rightTime) return leftTime - rightTime;
+            return Number(left.sequence || 0) - Number(right.sequence || 0);
+          });
+      };
+
+      const aiTraceRole = (event) => {
+        const role = String(event.role || "").toLowerCase();
+        if (role === "person" || role === "assistant") return "assistant";
+        if (role === "tool" || String(event.type || "").includes("tool")) return "system";
+        if (role === "activity" || String(event.type || "").includes("activity")) return "system";
+        return "assistant";
+      };
+
+      const aiTraceMeta = (event) => {
+        const type = String(event.type || "ai.activity").replace(/^ai\./, "").replace(/[._-]/g, " ");
+        const node = event.nodeName || event.nodeKey || "AI";
+        return `${node} · ${type}`;
+      };
+
+      const aiTraceText = (event) => {
+        const title = String(event.title || "").trim();
+        const content = summarizeAiTraceContent(event.content);
+        if (!title) return content;
+        if (!content || content === title) return title;
+        return `${title}\n${content}`;
+      };
+
+      const renderAiTrace = async (execution, animate = true) => {
+        const executionId = execution?.id || execution?.executionId;
+          if (!executionId) return;
+        for (const event of aiTraceEvents(execution)) {
+          const stableEventId = event?.metadata?.runtimeEventId || event.id || event.sequence;
+          const key = [
+            executionId,
+            "aiTrace",
+            stableEventId,
+            event.sessionRecordId || "",
+            event.type || "",
+          ].join(":");
+          if (state.renderedNodes.has(key)) continue;
+          const text = aiTraceText(event);
+          if (!text) continue;
+          state.renderedNodes.add(key);
+          const stepLabel = aiTraceStepLabel(event);
+          appendToolLine(
+            execution,
+            event.nodeKey || "ai",
+            event.nodeName || event.nodeKey || "AI",
+            stepLabel === "message" ? "reasoning" : stepLabel,
+            text,
+            String(event.type || "").includes("failed") || String(event.type || "").includes("error") ? "failed" : "running",
+          );
+        }
+      };
+
+      const runtimeAiEventText = (event) => {
+        const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+        return summarizeAiTraceContent(payload.content || event.message || "");
+      };
+
+      const runtimeAiEventNodeKey = (event) => {
+        const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+        return payload.node_key || payload.nodeKey || event.nodeKey || event.node_key || "ai";
+      };
+
+      const runtimeAiEventNodeName = (event) => {
+        const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+        return payload.node_name || payload.nodeName || payload.node_key || payload.nodeKey || "AI";
+      };
+
+      const runtimeAiEventStepLabel = (event) => {
+        const type = String(event.type || event.eventType || "");
+        const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+        if (payload.stream === "stderr" || type.includes("activity.log")) return "activity";
+        if (type.includes("activity.started")) return "starting";
+        if (type.includes("activity.failed")) return "failed";
+        if (type.includes("message.completed")) return "done";
+        if (type.includes("message.delta")) return "message";
+        return "activity";
+      };
+
+      const renderRuntimeAiEvents = async (execution, animate = true) => {
+        const executionId = execution?.id || execution?.executionId;
+        if (!executionId) return;
+        for (const event of runtimeAiEvents(execution)) {
+          const type = String(event.type || event.eventType || "");
+          const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+          const text = runtimeAiEventText(event);
+          if (!text) continue;
+          const syntheticTraceEvent = {
+            type: type.replace(/^workflow_runtime\./, ""),
+            title: payload.title || runtimeAiEventNodeName(event),
+            content: text,
+            payload,
+          };
+          if (!aiTraceEventWorthRendering(syntheticTraceEvent)) continue;
+          const key = [executionId, "runtimeAi", event.id || event.sequence || type].join(":");
+          if (state.renderedNodes.has(key)) continue;
+          state.renderedNodes.add(key);
+          const stepLabel = runtimeAiEventStepLabel(event);
+          await appendNodeStep(
+            execution,
+            runtimeAiEventNodeKey(event),
+            runtimeAiEventNodeName(event),
+            stepLabel,
+            text,
+            {
+              status: type.includes("failed") || stepLabel === "failed" ? "failed" : type.includes("completed") ? "done" : "running",
+              animate: false,
+            },
+          );
+        }
+      };
+
+      const aiTraceStepLabel = (event) => {
+        const type = String(event.type || "");
+        if (type.includes("reasoning")) return "reasoning";
+        if (type.includes("tool")) return "tool";
+        if (type.includes("message")) return "message";
+        if (type.includes("memory")) return "memory";
+        if (type.includes("completed")) return "done";
+        return "activity";
+      };
+
+      const executionEvents = (execution) =>
+        (Array.isArray(execution?.events) ? execution.events : [])
+          .filter((event) => event && typeof event === "object")
+          .filter((event) => !String(event.type || event.eventType || "").startsWith("workflow_runtime.ai."))
+          .slice()
+          .sort((left, right) => Number(left.sequence || 0) - Number(right.sequence || 0));
+
+      const eventTitle = (event) =>
+        String(event.type || event.eventType || "workflow event")
+          .replace(/^workflow_runtime\./, "")
+          .replace(/[._-]/g, " ");
+
+      const eventText = (event) => {
+        const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+        const type = String(event.type || event.eventType || "");
+        const message = String(event.message || "").trim();
+        const node = payload.node_name || payload.nodeName || payload.node_key || payload.nodeKey || "";
+        const output = payload.outputs || payload.output || null;
+        const lines = [message || eventHumanText(type, eventTitle(event))];
+        if (node) lines.push(`Node: ${node}`);
+        if (output && Object.keys(output).length) {
+          const summary = outputSummary(output);
+          if (summary) lines.push(String(summary));
+        }
+        return lines.filter(Boolean).join("\n");
+      };
+
+      const eventHumanText = (type, fallback) => {
+        if (type.endsWith(".queued")) return "starting...";
+        if (type.endsWith(".started")) return "starting...";
+        if (type.endsWith(".waiting")) return "waiting";
+        if (type.endsWith(".completed")) return "done.";
+        if (type.endsWith(".failed")) return "failed.";
+        if (type.includes("human") && type.includes("resumed")) return "submitted.";
+        if (type.includes("human")) return "human input";
+        return fallback;
+      };
+
+      const renderExecutionEvents = async (execution, animate = true) => {
+        const executionId = execution?.id || execution?.executionId;
+        if (!executionId) return;
+        for (const event of executionEvents(execution)) {
+          const type = String(event.type || event.eventType || "");
+          if (!type) continue;
+          const key = [executionId, "event", event.id || event.sequence || type].join(":");
+          if (state.renderedNodes.has(key)) continue;
+          state.renderedNodes.add(key);
+          const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+          const nodeKey = payload.node_key || payload.nodeKey || event.nodeKey || "workflow";
+          const nodeName = payload.node_name || payload.nodeName || payload.node_key || payload.nodeKey || eventTitle(event);
+          if (type === "workflow_runtime.node.started") {
+            const item = ensureNodeBlock(execution, nodeKey, nodeName);
+            item.dataset.nodeStatus = "running";
+            item.classList.remove("done", "failed");
+            item.querySelector(".node-status").textContent = "running";
+            updateNodeWorkSummary(item, execution, nodeKey);
+            ensureDurationTimer();
+            continue;
+          }
+          if (type === "workflow_runtime.node.completed" || type === "workflow_runtime.node.failed") {
+            const item = ensureNodeBlock(execution, nodeKey, nodeName);
+            const failed = type.endsWith(".failed");
+            item.dataset.nodeStatus = failed ? "failed" : "done";
+            item.classList.toggle("failed", failed);
+            item.classList.toggle("done", !failed);
+            item.querySelector(".node-status").textContent = failed ? "failed" : "done";
+            item.querySelector(".node-working-placeholder")?.remove();
+            updateNodeWorkSummary(item, execution, nodeKey);
+            updateNodeRail(execution);
+            continue;
+          }
+          const text = eventText(event);
+          if (!text) continue;
+          await appendNodeStep(
+            execution,
+            nodeKey,
+            nodeName,
+            eventStepLabel(type),
+            text,
+            {
+              status: type.includes("failed") ? "failed" : type.includes("completed") ? "done" : "running",
+              animate,
+            },
+          );
+        }
+      };
+
+      const eventStepLabel = (type) => {
+        if (type.endsWith(".started")) return "starting";
+        if (type.endsWith(".waiting")) return "waiting";
+        if (type.includes("approval.requested")) return "approval";
+        if (type.includes("human")) return "human input";
+        if (type.endsWith(".completed")) return "done";
+        if (type.endsWith(".failed")) return "failed";
+        return "activity";
+      };
+
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      const autoDir = (element) => {
+        if (element) element.dir = "auto";
+        return element;
+      };
 
       const shouldReduceMotion = () =>
         window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
@@ -4104,10 +4874,307 @@
         element.textContent = "";
         const chunkSize = value.length > 480 ? 12 : 4;
         for (let index = 0; index < value.length; index += chunkSize) {
+          const wasAtBottom = transcriptAtBottom();
           element.textContent += value.slice(index, index + chunkSize);
-          $("transcript").scrollTop = $("transcript").scrollHeight;
+          maybeScrollTranscriptToBottom(wasAtBottom);
           await sleep(12);
         }
+      };
+
+      const compactText = (text, maxLength = 520) => {
+        const value = String(text || "").replace(/\r\n/g, "\n").trim();
+        if (value.length <= maxLength) return value;
+        return `${value.slice(0, maxLength).trimEnd()}\n...`;
+      };
+
+      const isTechnicalStep = (stepLabel) =>
+        [
+          "activity",
+          "starting",
+          "done",
+          "waiting",
+          "failed",
+          "tool",
+          "reasoning",
+          "memory",
+          "approval",
+          "human input",
+        ].includes(String(stepLabel || "").toLowerCase());
+
+      const technicalNodeKeys = new Set(["runner", "review_gate"]);
+
+      const isTechnicalNodeOutput = (key, stepLabel) =>
+        technicalNodeKeys.has(String(key || "")) &&
+        String(stepLabel || "").toLowerCase() === "output";
+
+      const isUserVisibleStep = (stepLabel, key) => {
+        const label = String(stepLabel || "").toLowerCase();
+        if (technicalNodeKeys.has(String(key || ""))) return false;
+        if (label === "output") return true;
+        return false;
+      };
+
+      const toolKindForStep = (stepLabel, text = "") => {
+        const label = String(stepLabel || "").toLowerCase();
+        const value = String(text || "").toLowerCase();
+        if (label.includes("tool") || value.includes("ran command") || value.includes("$ ") || value.includes("cargo ") || value.includes("git ")) return "command";
+        if (label.includes("read") || value.includes("read file") || value.includes("file.read") || value.includes("read a file")) return "read";
+        if (label.includes("write") || value.includes("edit") || value.includes("write file") || value.includes("file.write") || value.includes("wrote") || value.includes("changed files")) return "write";
+        if (label.includes("search") || value.includes("search") || value.includes("searched")) return "search";
+        return label.includes("reasoning") ? "reasoning" : "activity";
+      };
+
+      const toolKindLabel = (kind, count = 1) => {
+        const plural = count === 1 ? "" : "s";
+        if (kind === "command") return `Ran ${count} command${plural}`;
+        if (kind === "read") return `Read ${count} file${plural}`;
+        if (kind === "write") return count === 1 ? "Edited a file" : `Edited ${count} files`;
+        if (kind === "search") return count === 1 ? "Searched files" : `Searched files ${count} times`;
+        if (kind === "reasoning") return `Reasoning`;
+        return count === 1 ? "Activity" : `${count} activities`;
+      };
+
+      const toolIcon = (kind) => {
+        if (kind === "command") return icons.terminal;
+        if (kind === "search") return icons.search;
+        if (kind === "read") return icons.fileRead;
+        if (kind === "write") return icons.fileWrite;
+        return icons.terminal;
+      };
+
+      const stepSummaryTitle = (stepLabel, text) => {
+        const label = String(stepLabel || "activity").trim();
+        const firstLine = String(text || "").split("\n").map((line) => line.trim()).find(Boolean);
+        if (!firstLine) return label;
+        if (label === "tool") return firstLine.length > 96 ? `${firstLine.slice(0, 96)}...` : firstLine;
+        if (label === "activity" || label === "starting" || label === "done") {
+          return firstLine.length > 88 ? `${firstLine.slice(0, 88)}...` : firstLine;
+        }
+        return label;
+      };
+
+      const toolBucketId = (executionId, key, kind) => `${executionId}:${key}:tools:${kind}`;
+
+      const nodeOrderFromExecution = (execution) => {
+        const order = [];
+        const push = (key) => {
+          const value = String(key || "").trim();
+          if (value && !order.includes(value)) order.push(value);
+        };
+        ["runner", "start"].forEach(push);
+        for (const event of executionEvents(execution)) {
+          const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+          push(payload.node_key || payload.nodeKey || event.nodeKey);
+        }
+        for (const event of aiTraceEvents(execution)) push(event.nodeKey);
+        Object.keys(execution.output?.nodeOutputs || execution.outputs?.nodeOutputs || {}).forEach(push);
+        ["end"].forEach(push);
+        return order;
+      };
+
+      const timestampMs = (value) => {
+        const time = Date.parse(value || "");
+        return Number.isFinite(time) ? time : null;
+      };
+
+      const eventNodeKey = (event = {}) => {
+        const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+        return String(payload.node_key || payload.nodeKey || event.nodeKey || event.node_key || "");
+      };
+
+      const eventTime = (event = {}) =>
+        timestampMs(event.createdAt || event.created_at || event.timestamp || event.time);
+
+      const nodeLifecycleTimes = (execution, key) => {
+        const nodeKey = String(key || "");
+        let started = null;
+        let finished = null;
+        for (const event of executionEvents(execution)) {
+          if (eventNodeKey(event) !== nodeKey) continue;
+          const type = String(event.type || event.eventType || "");
+          const time = eventTime(event);
+          if (!time) continue;
+          if (type.endsWith(".started")) started = started ? Math.min(started, time) : time;
+          if (type.endsWith(".completed") || type.endsWith(".failed") || type.endsWith(".waiting")) {
+            finished = finished ? Math.max(finished, time) : time;
+          }
+        }
+        for (const event of runtimeAiEvents(execution)) {
+          if (runtimeAiEventNodeKey(event) !== nodeKey) continue;
+          const time = eventTime(event);
+          if (time) started = started ? Math.min(started, time) : time;
+        }
+        for (const event of aiTraceEvents(execution)) {
+          if (String(event.nodeKey || "") !== nodeKey) continue;
+          const time = timestampMs(event.createdAt || event.created_at || event.timestamp || event.time);
+          if (!time) continue;
+          started = started ? Math.min(started, time) : time;
+          finished = finished ? Math.max(finished, time) : time;
+        }
+        return { started, finished };
+      };
+
+      const nodeDurationText = (execution, key) => {
+        const executionId = execution?.id || execution?.executionId || "execution";
+        const item = document.querySelector(`[data-node-run="${executionId}:${key}"]`);
+        const running = String(item?.dataset.nodeStatus || "") === "running";
+        const { started, finished } = nodeLifecycleTimes(execution, key);
+        if (started) {
+          const duration = formatDuration((running ? Date.now() : finished || Date.now()) - started);
+          if (duration) return `${running ? "Working" : "Worked"} for ${duration}`;
+        }
+        return running ? "Working" : "Worked";
+      };
+
+      const updateNodeWorkSummary = (item, execution, key) => {
+        const details = item.querySelector(".node-work-details");
+        const summary = item.querySelector(".node-work-summary");
+        if (!details || !summary) return;
+        summary.textContent = nodeDurationText(execution, key);
+        details.open = String(item.dataset.nodeStatus || "") === "running";
+      };
+
+      const updateLiveDurations = () => {
+        const execution = state.currentExecution;
+        const executionId = execution?.id || execution?.executionId;
+        if (!executionId) return;
+        for (const item of document.querySelectorAll(`[data-node-run^="${executionId}:"]`)) {
+          if (String(item.dataset.nodeStatus || "") === "running") {
+            updateNodeWorkSummary(item, execution, item.dataset.nodeKey || "");
+          }
+        }
+      };
+
+      const ensureDurationTimer = () => {
+        if (state.durationTimer) return;
+        state.durationTimer = window.setInterval(updateLiveDurations, 1000);
+      };
+
+      const ensureTraceNode = (execution, key, label) => {
+        const item = ensureNodeBlock(execution, key, label);
+        updateNodeWorkSummary(item, execution, key);
+        return item.querySelector(".node-work-body");
+      };
+
+      const ensureToolBucket = (execution, key, label, kind) => {
+        const executionId = execution?.id || execution?.executionId || "execution";
+        const bucketId = toolBucketId(executionId, key, kind);
+        let bucket = document.querySelector(`[data-tool-bucket="${bucketId}"]`);
+        if (bucket) return bucket;
+        bucket = document.createElement("details");
+        bucket.className = "tool-summary-line";
+        bucket.dataset.toolBucket = bucketId;
+        bucket.dataset.toolCount = "0";
+        bucket.dataset.toolKind = kind;
+        bucket.dataset.nodeKey = key;
+        bucket.dataset.executionId = executionId;
+        bucket.innerHTML = `
+          <summary class="tool-summary-head">
+            <span class="tool-summary-icon">${toolIcon(kind)}</span>
+            <span class="tool-summary-title"></span>
+            <span class="tool-summary-detail"></span>
+            <span class="tool-summary-chevron">${icons.chevron}</span>
+          </summary>
+          <div class="tool-summary-body"></div>
+        `;
+        bucket.querySelector(".tool-summary-title").textContent = toolKindLabel(kind, 0);
+        bucket.querySelector(".tool-summary-detail").textContent = "";
+        const traceNode = ensureTraceNode(execution, key, label);
+        const wasAtBottom = transcriptAtBottom();
+        (traceNode || $("transcript")).append(bucket);
+        maybeScrollTranscriptToBottom(wasAtBottom);
+        return bucket;
+      };
+
+      const appendToolLine = (execution, key, label, stepLabel, text, status = "running") => {
+        const kind = toolKindForStep(stepLabel, text);
+        if (kind === "activity" && !["failed", "waiting"].includes(String(stepLabel || "").toLowerCase())) {
+          return null;
+        }
+        const entryText = compactText(toolEntryText(kind, text, label || nodeLabel(key)), 1200);
+        if (!entryText) return null;
+        const bucket = ensureToolBucket(execution, key, label, kind);
+        if (!bucket) return null;
+        const count = Number(bucket.dataset.toolCount || "0") + 1;
+        bucket.dataset.toolCount = String(count);
+        bucket.querySelector(".tool-summary-title").textContent = toolKindLabel(kind, count);
+        bucket.classList.toggle("failed", status === "failed");
+        const body = bucket.querySelector(".tool-summary-body");
+        const entry = document.createElement("div");
+        entry.dir = "auto";
+        entry.textContent = entryText;
+        const wasAtBottom = transcriptAtBottom();
+        body.append(entry);
+        if (status === "failed") bucket.open = true;
+        maybeScrollTranscriptToBottom(wasAtBottom);
+        return bucket;
+      };
+
+      const basename = (path) =>
+        String(path || "")
+          .split(/[\\/]/)
+          .filter(Boolean)
+          .pop() || String(path || "");
+
+      const firstUsefulLine = (text) =>
+        String(text || "")
+          .split("\n")
+          .map((line) => line.trim())
+          .find(Boolean) || "";
+
+      const commandFromText = (text) => {
+        const lines = String(text || "").split("\n").map((line) => line.trim()).filter(Boolean);
+        const shellLine = lines.find((line) => line.startsWith("$ "));
+        if (shellLine) return shellLine.slice(2).trim();
+        const ranLine = lines.find((line) => /^ran\s+/i.test(line));
+        if (ranLine) return ranLine.replace(/^ran\s+/i, "").trim();
+        return lines.find((line) => /^(cargo|git|node|pnpm|npm|yarn|python|ruby|kubectl|docker)\b/.test(line)) || "";
+      };
+
+      const fileFromText = (text) => {
+        const value = String(text || "");
+        const explicit =
+          value.match(/(?:read|edited|wrote|write|file)\s+([^\s,;:]+(?:\.[A-Za-z0-9_-]+)?)/i)?.[1] ||
+          value.match(/([A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)/)?.[1] ||
+          value.match(/\b([A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+)\b/)?.[1];
+        return explicit ? basename(explicit) : "";
+      };
+
+      const sameLooseText = (left, right) =>
+        String(left || "").trim().toLowerCase().replace(/[_\s-]+/g, " ") ===
+        String(right || "").trim().toLowerCase().replace(/[_\s-]+/g, " ");
+
+      const toolEntryText = (kind, text, label = "") => {
+        const value = String(text || "").trim();
+        const firstLine = firstUsefulLine(value);
+        if (sameLooseText(firstLine, label)) return "";
+        if (kind === "command") {
+          const command = commandFromText(value);
+          return command ? `Ran ${command}` : "";
+        }
+        if (kind === "read") {
+          const file = fileFromText(value);
+          return file ? `Read ${file}` : compactText(firstLine || value, 240);
+        }
+        if (kind === "write") {
+          const file = fileFromText(value);
+          return file ? `Edited ${file}` : compactText(firstLine || value, 240);
+        }
+        if (kind === "search") {
+          return firstLine ? firstLine.replace(/^searched\s+/i, "Searched ") : compactText(value, 240);
+        }
+        return compactText(value, 360);
+      };
+
+      const moveToolBucketsToRunDuration = (execution) => {
+        const executionId = execution?.id || execution?.executionId;
+        if (!executionId || state.completedRuns.has(executionId)) return;
+        const details = document.querySelector(`[data-run-duration="${executionId}"]`);
+        const body = details?.querySelector(".run-duration-body");
+        if (!body) return;
+        const buckets = Array.from(document.querySelectorAll(`[data-execution-id="${executionId}"].tool-summary-line`));
+        for (const bucket of buckets) body.append(bucket);
+        state.completedRuns.add(executionId);
       };
 
       const formatDuration = (milliseconds) => {
@@ -4119,25 +5186,22 @@
         return `${minutes}m ${seconds}s`;
       };
 
-      const executionDurationText = (execution) => {
+      const executionDurationText = (execution, terminal = false) => {
         const started = Date.parse(execution.startedAt || execution.createdAt || "");
-        const finished = Date.parse(
-          execution.finishedAt || execution.completedAt || execution.updatedAt || "",
-        );
+        const finished = terminal
+          ? Date.parse(execution.finishedAt || execution.completedAt || execution.updatedAt || "")
+          : Date.now();
         const duration = formatDuration(finished - started);
-        return duration ? `Worked for ${duration}` : "";
+        if (!duration) return "";
+        return `${terminal ? "Worked" : "Working"} for ${duration}`;
       };
 
       const appendRunDuration = (execution) => {
-        const id = `${execution.id}:duration`;
-        if (state.renderedNodes.has(id)) return;
-        const text = executionDurationText(execution);
-        if (!text) return;
-        state.renderedNodes.add(id);
-        const item = document.createElement("div");
-        item.className = "run-duration";
-        item.textContent = text;
-        $("transcript").append(item);
+        const executionId = execution?.id || execution?.executionId;
+        if (!executionId) return;
+        for (const item of document.querySelectorAll(`[data-node-run^="${executionId}:"]`)) {
+          updateNodeWorkSummary(item, execution, item.dataset.nodeKey || "");
+        }
       };
 
       const formatJsonish = (value) => {
@@ -4159,6 +5223,24 @@
         String(field || "answer")
           .replace(/[_-]/g, " ")
           .replace(/\b\w/g, (char) => char.toUpperCase());
+
+      const tryParseJsonObject = (value) => {
+        if (typeof value !== "string") return null;
+        const trimmed = value.trim();
+        if (!trimmed || !trimmed.startsWith("{")) return null;
+        try {
+          const parsed = JSON.parse(trimmed);
+          return isRecord(parsed) ? parsed : null;
+        } catch {
+          return null;
+        }
+      };
+
+      const summarizeAiTraceContent = (value) => {
+        const parsed = tryParseJsonObject(value);
+        if (parsed) return outputSummary(parsed);
+        return String(value || "").trim();
+      };
 
       const schemaFieldType = (definition = {}) => {
         const type = definition?.type;
@@ -4293,6 +5375,19 @@
         if (!request) return false;
         const status = rawStatus(request.status || "pending");
         return !status || ["pending", "in_review", "waiting"].includes(status);
+      };
+
+      const humanRequestKey = (request, execution = {}) => {
+        const requestId = request?.id || request?.requestId || request?.request_id;
+        if (!requestId) return "";
+        const executionId =
+          request?.executionId ||
+          request?.execution_id ||
+          request?.execution?.id ||
+          execution?.id ||
+          execution?.executionId ||
+          "";
+        return `${executionId || "execution"}:${requestId}`;
       };
 
       const normalizeHumanRequest = (raw, execution = {}, fallbackWorkflowId = "") => {
@@ -4446,16 +5541,18 @@
           state.humanResponse = {};
           state.humanJsonResponse = "{}";
           state.humanSubmitError = "";
+          state.humanComposerSignature = "";
           renderHumanInputComposer();
           return;
         }
         const currentSchema = JSON.stringify(state.pendingHumanRequest?.outputSchema || null);
         const nextSchema = JSON.stringify(request.outputSchema || null);
+        const shouldRebuild = currentId !== nextId || currentSchema !== nextSchema;
         state.pendingHumanRequest = request;
-        if (currentId !== nextId || currentSchema !== nextSchema) {
+        if (shouldRebuild) {
           hydrateHumanResponse(request);
         }
-        renderHumanInputComposer();
+        renderHumanInputComposer({ rebuildFields: shouldRebuild });
       };
 
       const humanReviewContextRows = (request) => {
@@ -4497,7 +5594,9 @@
         if (spec.jsonFallback || type === "object" || type === "array") {
           const textarea = document.createElement("textarea");
           textarea.className = "human-json";
+          textarea.dir = "auto";
           textarea.spellcheck = false;
+          textarea.dataset.humanJson = spec.key;
           textarea.value = spec.jsonFallback
             ? state.humanJsonResponse
             : typeof value === "string"
@@ -4516,6 +5615,7 @@
         if (options.length) {
           if (options.length > 6) {
             const select = document.createElement("select");
+            select.dataset.humanField = spec.key;
             select.value = value ?? "";
             const empty = document.createElement("option");
             empty.value = "";
@@ -4569,6 +5669,7 @@
           const input = document.createElement("input");
           input.type = "number";
           input.step = type === "integer" ? "1" : "any";
+          input.dataset.humanField = spec.key;
           input.value = value ?? "";
           input.addEventListener("input", () => {
             setHumanFieldValue(spec.key, input.value === "" ? "" : Number(input.value));
@@ -4578,13 +5679,15 @@
         }
 
         const textarea = document.createElement("textarea");
+        textarea.dir = "auto";
+        textarea.dataset.humanField = spec.key;
         textarea.value = value ?? "";
         textarea.placeholder = "Type your response...";
         textarea.addEventListener("input", () => setHumanFieldValue(spec.key, textarea.value));
         container.append(textarea);
       };
 
-      const renderHumanInputComposer = () => {
+      const renderHumanInputComposer = ({ rebuildFields = false } = {}) => {
         const wrap = document.querySelector(".composer-wrap");
         const form = $("composerForm");
         const card = $("humanInputCard");
@@ -4592,16 +5695,36 @@
         wrap?.classList.toggle("hidden", !request);
         form.classList.toggle("human-mode", Boolean(request));
         card.classList.toggle("hidden", !request);
-        if (!request) return;
+        if (!request) {
+          state.humanComposerSignature = "";
+          return;
+        }
 
         $("humanInputTitle").textContent = request.question || request.title || "Human input required";
+        $("humanInputTitle").dir = "auto";
         $("humanInputDescription").textContent =
           request.description || "This workflow is paused until you submit a response.";
+        $("humanInputDescription").dir = "auto";
         $("humanInputBadge").textContent = request.blocking ? "Blocking" : "Waiting";
         $("humanInputSubmit").disabled = state.humanResolving;
         $("humanInputSubmit").textContent = state.humanResolving ? "Submitting..." : "Submit & resume";
         $("humanInputError").textContent = state.humanSubmitError || "";
 
+        const signature = JSON.stringify({
+          id: request.id || "",
+          schema: request.outputSchema || null,
+          context: humanReviewContextRows(request),
+          response: state.humanResponse,
+        });
+        const shouldRebuildFields = rebuildFields || state.humanComposerSignature !== signature;
+        if (!shouldRebuildFields) return;
+        state.humanComposerSignature = signature;
+        const active = document.activeElement;
+        const activeName = active?.dataset?.humanField || active?.dataset?.humanJson || "";
+        const selection =
+          active && typeof active.selectionStart === "number"
+            ? { start: active.selectionStart, end: active.selectionEnd }
+            : null;
         const context = $("humanInputContext");
         context.innerHTML = "";
         humanReviewContextRows(request).forEach(([label, value]) => {
@@ -4609,10 +5732,11 @@
           row.className = "human-context-row";
           row.innerHTML = "<strong></strong><span></span>";
           row.querySelector("strong").textContent = label;
-          row.querySelector("span").textContent = value;
+          const valueEl = row.querySelector("span");
+          valueEl.dir = "auto";
+          valueEl.textContent = value;
           context.append(row);
         });
-
         const fields = $("humanInputFields");
         fields.innerHTML = "";
         for (const spec of humanFieldSpecs(request)) {
@@ -4630,7 +5754,9 @@
             </div>
           `;
           field.querySelector("strong").textContent = `${label}${spec.required ? " *" : ""}`;
-          field.querySelector(".human-field-label span").textContent = description;
+          const descriptionEl = field.querySelector(".human-field-label span");
+          descriptionEl.dir = "auto";
+          descriptionEl.textContent = description;
           field.querySelector(".human-field-label span").classList.toggle("hidden", !description);
           field.querySelector(".human-field-type").textContent = spec.jsonFallback
             ? "json"
@@ -4639,6 +5765,17 @@
             : schemaFieldType(spec.definition);
           renderHumanControl(field, spec);
           fields.append(field);
+        }
+        if (activeName) {
+          const nextActive = Array.from(fields.querySelectorAll("[data-human-field], [data-human-json]")).find(
+            (item) => item.dataset.humanField === activeName || item.dataset.humanJson === activeName,
+          );
+          if (nextActive) {
+            nextActive.focus({ preventScroll: true });
+            if (selection && typeof nextActive.setSelectionRange === "function") {
+              nextActive.setSelectionRange(selection.start, selection.end);
+            }
+          }
         }
       };
 
@@ -4719,7 +5856,7 @@
           execution,
           workflowId,
         );
-        if (directRequest) {
+        if (directRequest && !state.resolvedHumanRequests.has(humanRequestKey(directRequest, execution))) {
           setActiveHumanRequest(directRequest);
           return directRequest;
         }
@@ -4734,6 +5871,7 @@
           });
           const request = (response.humanRequests || response.human_requests || [])
             .map((item) => normalizeHumanRequest(item, execution, workflowId))
+            .filter((item) => item && !state.resolvedHumanRequests.has(humanRequestKey(item, execution)))
             .find(Boolean);
           setActiveHumanRequest(request || null);
           return request || null;
@@ -4757,6 +5895,10 @@
         state.humanResolving = true;
         state.humanSubmitError = "";
         renderHumanInputComposer();
+        const currentExecutionId = request.executionId || state.selectedRunId;
+        if (currentExecutionId) {
+          void pollExecution(currentExecutionId);
+        }
         try {
           const response = await call("human_request_resolve", {
             request: {
@@ -4767,15 +5909,20 @@
             },
           });
           appendMessage("system", "Human response submitted. Resuming workflow...", "Human input");
+          state.resolvedHumanRequests.add(humanRequestKey(request));
           setActiveHumanRequest(null);
-          const executionId = response?.result?.executionId || request.executionId || state.selectedRunId;
+          const executionId = response?.result?.executionId || currentExecutionId;
           if (executionId) {
             const detail = await call("workflow_run_detail", {
               request: { profile: null, executionId },
             });
-            const execution = executionFromDetailResponse(detail);
-            const humanRequest = await renderExecutionTimeline(execution, true);
-            if (!terminalExecutionStatuses.has(cleanStatus(execution.status)) && !humanRequest) {
+            const execution = {
+              ...executionFromDetailResponse(detail),
+              id: executionId,
+              executionId,
+            };
+            await renderExecutionTimeline(execution, true);
+            if (!terminalExecutionStatuses.has(cleanStatus(execution.status))) {
               await pollExecution(executionId);
             }
           }
@@ -4820,7 +5967,66 @@
           ];
           return lines.filter(Boolean).join("\n");
         }
-        return formatJsonish(output);
+        return outputSummary(output);
+      };
+
+      const outputSummary = (output) => {
+        if (!output || typeof output !== "object") return String(output ?? "");
+        const lines = [];
+        for (const key of [
+          "summary",
+          "implementation_summary",
+          "implementation_report",
+          "review_report",
+          "reason",
+          "message",
+          "status",
+          "decision",
+          "approved",
+          "result",
+          "answer",
+        ]) {
+          const value = output[key];
+          if (typeof value === "string" && value.trim()) {
+            lines.push(value.trim());
+            continue;
+          }
+          if (typeof value === "number" || typeof value === "boolean") {
+            lines.push(`${formatFieldLabel(key)}: ${value}`);
+            continue;
+          }
+        }
+        if (!lines.length && typeof output.response_text === "string") {
+          const parsed = tryParseJsonObject(output.response_text);
+          if (parsed) {
+            const summary = outputSummary(parsed);
+            if (summary) lines.push(summary);
+          } else if (output.response_text.trim()) {
+            lines.push(output.response_text.trim());
+          }
+        }
+        const changed = output.changedFiles || output.changed_files || output.filePaths || output.filesChanged;
+        if (Array.isArray(changed) && changed.length) {
+          lines.push(`Changed files: ${changed.map((item) => String(item?.path || item)).join(", ")}`);
+        }
+        if (Array.isArray(output.files) && output.files.length) {
+          lines.push(`Files: ${output.files.map((item) => String(item?.path || item)).slice(0, 6).join(", ")}`);
+        }
+        if (output.human_request || output.humanRequest) {
+          const request = output.human_request || output.humanRequest;
+          lines.push(`Question: ${request.question || request.title || "Human input required"}`);
+        }
+        if (output.error) {
+          lines.push(`Error: ${typeof output.error === "string" ? output.error : formatJsonish(output.error)}`);
+        }
+        if (!lines.length) {
+          const simple = Object.entries(output)
+            .filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))
+            .slice(0, 4)
+            .map(([key, value]) => `${formatFieldLabel(key)}: ${value}`);
+          lines.push(...simple);
+        }
+        return lines.filter(Boolean).join("\n") || "Done.";
       };
 
       const nodeLabel = (key) =>
@@ -4831,7 +6037,7 @@
           technical_lead: "Technical Lead",
           review_gate: "Review Gate",
           end: "Implementation Report",
-        })[key] || key;
+        })[key] || formatFieldLabel(key);
 
       const nodeInitial = (key) =>
         ({
@@ -4843,53 +6049,241 @@
           end: "F",
         })[key] || "N";
 
-      const appendNodeMessage = async (key, output, execution, animate = true) => {
-        const id = `${execution.id}:${key}`;
-        if (state.renderedNodes.has(id)) return;
-        state.renderedNodes.add(id);
-        const item = document.createElement("article");
-        item.className = "message node done";
+      const nodeOutputEntries = (nodeOutputs = {}, execution = null) => {
+        const order = execution ? nodeOrderFromExecution(execution) : [];
+        return Object.entries(nodeOutputs || {}).filter(([, output]) => {
+          if (!output || typeof output !== "object") return false;
+          return Object.keys(output).length > 0;
+        }).sort(([left], [right]) => {
+          const leftIndex = order.indexOf(left);
+          const rightIndex = order.indexOf(right);
+          if (leftIndex === -1 && rightIndex === -1) return left.localeCompare(right);
+          if (leftIndex === -1) return 1;
+          if (rightIndex === -1) return -1;
+          return leftIndex - rightIndex;
+        });
+      };
+
+      const isCompletedNodeStatus = (status) =>
+        ["done", "final", "failed"].includes(String(status || "").toLowerCase());
+
+      const setNodeRailWave = (rail, centerIndex = -1) => {
+        const markers = Array.from(rail.querySelectorAll(".node-rail-marker"));
+        markers.forEach((marker, index) => {
+          const distance = Math.abs(index - centerIndex);
+          marker.classList.toggle("wave-center", distance === 0);
+          marker.classList.toggle("wave-near", distance === 1);
+          marker.classList.toggle("wave-far", distance === 2);
+        });
+      };
+
+      const ensureNodeRailWave = (rail) => {
+        if (rail.dataset.waveBound === "true") return;
+        rail.dataset.waveBound = "true";
+        rail.addEventListener("pointermove", (event) => {
+          const markers = Array.from(rail.querySelectorAll(".node-rail-marker"));
+          if (!markers.length) return;
+          let centerIndex = 0;
+          let closestDistance = Number.POSITIVE_INFINITY;
+          markers.forEach((marker, index) => {
+            const bounds = marker.getBoundingClientRect();
+            const distance = Math.abs(event.clientY - (bounds.top + bounds.height / 2));
+            if (distance < closestDistance) {
+              closestDistance = distance;
+              centerIndex = index;
+            }
+          });
+          setNodeRailWave(rail, centerIndex);
+        });
+        rail.addEventListener("pointerleave", () => setNodeRailWave(rail));
+        rail.addEventListener("focusin", (event) => {
+          const markers = Array.from(rail.querySelectorAll(".node-rail-marker"));
+          const centerIndex = markers.indexOf(event.target);
+          if (centerIndex >= 0) setNodeRailWave(rail, centerIndex);
+        });
+        rail.addEventListener("focusout", (event) => {
+          if (!rail.contains(event.relatedTarget)) setNodeRailWave(rail);
+        });
+      };
+
+      const updateNodeRail = (execution = state.currentExecution) => {
+        const rail = $("nodeRail");
+        if (!rail) return;
+        ensureNodeRailWave(rail);
+        const executionId = execution?.id || execution?.executionId;
+        if (!executionId) {
+          rail.innerHTML = "";
+          return;
+        }
+        const nodes = Array.from($("transcript").querySelectorAll(`[data-node-run^="${executionId}:"]`))
+          .filter((node) => isCompletedNodeStatus(node.dataset.nodeStatus))
+          .sort((left, right) => {
+            const order = nodeOrderFromExecution(execution);
+            return order.indexOf(left.dataset.nodeKey || "") - order.indexOf(right.dataset.nodeKey || "");
+          });
+        rail.innerHTML = "";
+        for (const node of nodes) {
+          const button = document.createElement("button");
+          const label = node.querySelector(".node-title strong")?.textContent || node.dataset.nodeKey || "Node";
+          button.type = "button";
+          button.className = "node-rail-marker";
+          button.dataset.nodeLabel = label;
+          button.setAttribute("aria-label", `Go to ${label}`);
+          button.addEventListener("click", () => {
+            node.scrollIntoView({ behavior: "smooth", block: "center" });
+            rail.querySelectorAll(".node-rail-marker").forEach((item) => item.classList.remove("active"));
+            button.classList.add("active");
+          });
+          rail.append(button);
+        }
+      };
+
+      const ensureNodeBlock = (execution, key, label = null) => {
+        const executionId = execution?.id || execution?.executionId || "execution";
+        const blockId = `${executionId}:${key}`;
+        let item = document.querySelector(`[data-node-run="${blockId}"]`);
+        if (item) {
+          updateNodeWorkSummary(item, execution, key);
+          return item;
+        }
+        item = document.createElement("article");
+        item.className = "message node";
+        item.dataset.nodeRun = blockId;
+        item.dataset.nodeKey = key;
+        item.dataset.nodeStatus = "running";
         item.innerHTML = `
           <div class="bubble node-card">
             <div class="node-header">
               <div class="node-title">
                 <span class="node-avatar" aria-hidden="true">${nodeInitial(key)}</span>
+                <span class="node-badge">Node</span>
                 <strong></strong>
               </div>
               <span class="node-status"></span>
             </div>
-            <div class="node-content"></div>
+            <details class="node-work-details">
+              <summary class="node-work-summary"></summary>
+              <div class="node-work-body"></div>
+            </details>
+            <div class="node-content">
+              <span class="node-working-placeholder">
+                <span>Working...</span>
+                <span class="thinking-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+              </span>
+            </div>
           </div>
         `;
-        item.querySelector("strong").textContent = nodeLabel(key);
-        item.querySelector(".node-status").textContent = key === "end" ? "final" : "done";
-        const content = item.querySelector(".node-content");
-        $("transcript").append(item);
-        $("transcript").scrollTop = $("transcript").scrollHeight;
-        const text = nodeMessageText(key, output, execution);
-        if (animate) {
-          item.classList.add("typing");
-          await typeText(content, text);
-        } else {
-          content.textContent = text;
+        item.querySelector("strong").textContent = label || nodeLabel(key);
+        item.querySelector(".node-status").textContent = "running";
+        updateNodeWorkSummary(item, execution, key);
+        const orderedKeys = nodeOrderFromExecution(execution);
+        const next = Array.from($("transcript").querySelectorAll(".message.node")).find((node) => {
+          const currentIndex = orderedKeys.indexOf(node.dataset.nodeKey || "");
+          const nextIndex = orderedKeys.indexOf(String(key || ""));
+          return nextIndex >= 0 && currentIndex >= 0 && currentIndex > nextIndex;
+        });
+        const wasAtBottom = transcriptAtBottom();
+        $("transcript").insertBefore(item, next || null);
+        maybeScrollTranscriptToBottom(wasAtBottom);
+        updateNodeRail(execution);
+        ensureDurationTimer();
+        return item;
+      };
+
+      const appendNodeStep = async (
+        execution,
+        key,
+        label,
+        stepLabel,
+        text,
+        { status = "running", animate = false } = {},
+      ) => {
+        const executionId = execution?.id || execution?.executionId || "execution";
+        const stepId = [
+          executionId,
+          key,
+          stepLabel,
+          String(text || "").slice(0, 120),
+        ].join(":");
+        if (state.renderedNodes.has(stepId)) {
+          return document.querySelector(`[data-node-run="${executionId}:${key}"]`);
         }
-        item.classList.remove("typing");
+        state.renderedNodes.add(stepId);
+        const technical =
+          isTechnicalNodeOutput(key, stepLabel) ||
+          (isTechnicalStep(stepLabel) && !isUserVisibleStep(stepLabel, key));
+        if (technical) {
+          return appendToolLine(execution, key, label, stepLabel, text, status);
+        }
+        const item = ensureNodeBlock(execution, key, label);
+        item.classList.toggle("done", status === "done");
+        item.classList.toggle("failed", status === "failed");
+        const visibleStatus = status === "done" ? "done" : status === "failed" ? "failed" : "running";
+        item.dataset.nodeStatus = visibleStatus;
+        item.querySelector(".node-status").textContent = visibleStatus;
+        const row = document.createElement("div");
+        row.className = `node-step ${status}`;
+        const role = "assistant";
+        row.innerHTML = `
+          <div class="node-message-row ${role}">
+            <div class="node-message-bubble">
+              <span class="node-step-label"></span>
+              <div class="node-step-text"></div>
+            </div>
+          </div>
+        `;
+        const stepLabelEl = row.querySelector(".node-step-label");
+        const normalizedStepLabel = String(stepLabel || "").toLowerCase();
+        const visibleStepLabel =
+          normalizedStepLabel === "message" || normalizedStepLabel === "output"
+            ? ""
+            : stepLabel;
+        if (visibleStepLabel) stepLabelEl.textContent = visibleStepLabel;
+        else stepLabelEl.remove();
+        const textEl = autoDir(row.querySelector(".node-step-text"));
+        const wasAtBottom = transcriptAtBottom();
+        const content = item.querySelector(".node-content");
+        content.querySelector(".node-working-placeholder")?.remove();
+        content.append(row);
+        if (animate) await typeText(textEl, compactText(text, 1400));
+        else textEl.textContent = compactText(text, 1400);
+        maybeScrollTranscriptToBottom(wasAtBottom);
+        updateNodeRail(execution);
+        return item;
+      };
+
+      const appendNodeMessage = async (key, output, execution, animate = true) => {
+        const id = `${execution.id}:${key}:output`;
+        if (state.renderedNodes.has(id)) return;
+        state.renderedNodes.add(id);
+        const item = await appendNodeStep(execution, key, nodeLabel(key), "output", nodeMessageText(key, output, execution), {
+          status: "done",
+          animate,
+        });
+        const statusEl = item?.querySelector(".node-status");
+        if (item) item.dataset.nodeStatus = key === "end" ? "final" : "done";
+        if (statusEl) statusEl.textContent = key === "end" ? "final" : "done";
+        if (item) updateNodeWorkSummary(item, execution, key);
+        updateNodeRail(execution);
 
         if (key === "backend_developer" && Array.isArray(output.files) && output.files.length) {
           const first = output.files[0];
           if (first?.content) {
-            const block = document.createElement("div");
-            block.className = "code-block";
-            block.innerHTML = "<div class=\"code-label\"></div><pre></pre>";
-            block.querySelector(".code-label").textContent = first.path || "file";
-            block.querySelector("pre").textContent = first.content;
-            item.querySelector(".node-card").append(block);
+            appendToolLine(
+              execution,
+              key,
+              nodeLabel(key),
+              "write",
+              `${first.path || "file"}\n${compactText(first.content, 2200)}`,
+              "done",
+            );
           }
         }
       };
 
       const appendActiveNode = (execution, label = "Working") => {
         const id = `${execution.id}:active`;
+        const wasAtBottom = transcriptAtBottom();
         let item = document.querySelector(`[data-active-run="${id}"]`);
         if (!item) {
           item = document.createElement("article");
@@ -4916,11 +6310,19 @@
           </span>
         `;
         item.querySelector(".thinking-row > span:first-child").textContent = label;
-        $("transcript").scrollTop = $("transcript").scrollHeight;
+        maybeScrollTranscriptToBottom(wasAtBottom);
       };
 
       const removeActiveNode = (execution) => {
         document.querySelector(`[data-active-run="${execution.id}:active"]`)?.remove();
+      };
+
+      const hasRunningNode = (execution) => {
+        const executionId = execution?.id || execution?.executionId;
+        if (!executionId) return false;
+        return Boolean(
+          document.querySelector(`[data-node-run^="${executionId}:"][data-node-status="running"]`),
+        );
       };
 
       const appendTerminalMessage = (execution, status) => {
@@ -4938,10 +6340,11 @@
       };
 
       const renderExecutionTimeline = async (execution, animate = true) => {
+        const executionId = execution.id || execution.executionId;
+        if (!executionId || state.selectedRunId !== executionId) return null;
         state.currentExecution = execution;
         const status = cleanStatus(execution.status);
         const workflowId = execution.workflowId || execution.workflow_id || state.selectedWorkflowId;
-        const executionId = execution.id || execution.executionId;
         const prompt = execution.input?.prompt || execution.inputs?.prompt || "";
         const summary = summarizeRun(execution);
         const files = changedFiles(execution);
@@ -4958,17 +6361,16 @@
         renderWorkflowGraph(execution);
         const humanRequest = await updateHumanRequestForExecution(execution, workflowId);
 
-        const nodeOutputs = execution.output?.nodeOutputs || {};
-        if (terminalExecutionStatuses.has(status)) {
-          appendRunDuration(execution);
-        }
+        const nodeOutputs = execution.output?.nodeOutputs || execution.outputs?.nodeOutputs || {};
+        appendRunDuration(execution);
         if (!state.renderedNodes.has(`${executionId}:runner`)) {
           await appendNodeMessage("runner", {}, execution, animate);
         }
-        for (const key of ["start", "backend_developer", "technical_lead", "review_gate", "end"]) {
-          if (nodeOutputs[key]) {
-            await appendNodeMessage(key, nodeOutputs[key], execution, animate);
-          }
+        await renderExecutionEvents(execution, animate);
+        await renderRuntimeAiEvents(execution, animate);
+        await renderAiTrace(execution, animate);
+        for (const [key, output] of nodeOutputEntries(nodeOutputs, execution)) {
+          await appendNodeMessage(key, output, execution, animate);
         }
         if (terminalExecutionStatuses.has(status)) {
           setActiveHumanRequest(null);
@@ -4976,8 +6378,10 @@
           appendTerminalMessage(execution, status);
         } else if (humanRequest) {
           appendActiveNode(execution, "Waiting for your response...");
-        } else if (!nodeOutputs.end) {
+        } else if (!nodeOutputs.end && !hasRunningNode(execution)) {
           appendActiveNode(execution, status === "queued" ? "Waiting for runner..." : "Thinking");
+        } else {
+          removeActiveNode(execution);
         }
         return humanRequest;
       };
@@ -4991,23 +6395,46 @@
           execution.humanRequest ||
           execution.human_request ||
           null;
-        return humanRequest ? { ...execution, humanRequest } : execution;
+        const aiTrace = result.aiTrace || result.ai_trace || execution.aiTrace || execution.ai_trace || null;
+        const events = Array.isArray(result.events) ? result.events : Array.isArray(execution.events) ? execution.events : [];
+        return {
+          ...execution,
+          ...(humanRequest ? { humanRequest } : {}),
+          events,
+          ...(aiTrace ? { aiTrace } : {}),
+        };
       };
 
       const pollExecution = async (executionId) => {
         if (!executionId || executionId === "execution") return;
-        for (let attempt = 0; attempt < 240; attempt += 1) {
-          await sleep(attempt === 0 ? 700 : 2000);
-          const response = await call("workflow_run_detail", {
-            request: {
-              profile: null,
+        if (state.activePolls.has(executionId)) return;
+        state.activePolls.add(executionId);
+        let attempt = 0;
+        try {
+          while (state.selectedRunId === executionId) {
+            await sleep(attempt === 0 ? 350 : Math.min(5000, 700 + attempt * 50));
+            attempt += 1;
+            if (state.selectedRunId !== executionId) return;
+            const response = await call("workflow_run_detail", {
+              request: {
+                profile: null,
+                executionId,
+              },
+            });
+            if (state.selectedRunId !== executionId) return;
+            const execution = {
+              ...executionFromDetailResponse(response),
+              id: executionId,
               executionId,
-            },
-          });
-          const execution = executionFromDetailResponse(response);
-          const humanRequest = await renderExecutionTimeline(execution, true);
-          if (terminalExecutionStatuses.has(cleanStatus(execution.status))) return;
-          if (humanRequest) return;
+            };
+            const humanRequest = await renderExecutionTimeline(execution, true);
+            if (terminalExecutionStatuses.has(cleanStatus(execution.status))) return;
+            if (humanRequest) {
+              attempt = Math.max(attempt, 35);
+            }
+          }
+        } finally {
+          state.activePolls.delete(executionId);
         }
       };
 
@@ -5050,17 +6477,29 @@
       const openRun = async (workflowId, executionId) => {
         state.selectedWorkflowId = workflowId;
         state.selectedRunId = executionId;
-        renderWorkflowList();
+        state.currentExecution = null;
+        updateWorkflowSelectionState();
         renderSelectedWorkflow();
         clearTranscript();
         const localRun = runsForWorkflow(workflowId).find((run) => run.executionId === executionId);
         if (localRun?.prompt) appendMessage("user", localRun.prompt, workflowName(selectedWorkflow()));
+        const loading = appendMessage("system", "Loading run details...", "Run").item;
         try {
           const response = await call("workflow_run_detail", {
             request: { profile: null, executionId },
           });
-          await renderExecutionTimeline(executionFromDetailResponse(response), false);
+          loading.remove();
+          const execution = {
+            ...executionFromDetailResponse(response),
+            id: executionId,
+            executionId,
+          };
+          await renderExecutionTimeline(execution, false);
+          if (!terminalExecutionStatuses.has(cleanStatus(execution.status))) {
+            void pollExecution(executionId);
+          }
         } catch (error) {
+          loading.remove();
           appendMessage("system", error.message, "Error");
         }
       };
@@ -5354,6 +6793,7 @@
 
         if (type === "object" || type === "array") {
           const textarea = document.createElement("textarea");
+          textarea.dir = "auto";
           textarea.spellcheck = false;
           textarea.dataset.runInput = spec.key;
           textarea.setAttribute("aria-invalid", String(invalid));
@@ -5438,6 +6878,7 @@
 
         if (isMultilineRunInput(spec)) {
           const textarea = document.createElement("textarea");
+          textarea.dir = "auto";
           textarea.dataset.runInput = spec.key;
           textarea.setAttribute("aria-invalid", String(invalid));
           textarea.value = value ?? "";
@@ -5449,6 +6890,7 @@
 
         const input = document.createElement("input");
         input.type = "text";
+        input.dir = "auto";
         input.autocomplete = "off";
         input.dataset.runInput = spec.key;
         input.setAttribute("aria-invalid", String(invalid));
@@ -5502,8 +6944,10 @@
             <div class="run-field-error" role="alert"></div>
           `;
           field.querySelector("strong").textContent = `${label}${spec.required ? " *" : ""}`;
-          field.querySelector(".run-field-label span").textContent = description;
-          field.querySelector(".run-field-label span").classList.toggle("hidden", !description);
+          const descriptionEl = field.querySelector(".run-field-label span");
+          descriptionEl.dir = "auto";
+          descriptionEl.textContent = description;
+          descriptionEl.classList.toggle("hidden", !description);
           field.querySelector(".run-field-type").textContent = runInputTypeLabel(spec);
           field.querySelector(".run-field-error").dataset.runInputError = spec.key;
           field.querySelector(".run-field-error").textContent = state.runModalInputErrors[spec.key] || "";
@@ -5651,6 +7095,8 @@
         const requestInputs = isRecord(inputs) ? { ...inputs } : {};
         state.sending = true;
         $("send").disabled = true;
+        state.selectedRunId = null;
+        state.currentExecution = null;
         clearTranscript();
         if (prompt) {
           appendMessage("user", prompt, workflowName(workflow));
@@ -5690,6 +7136,8 @@
               ...execution,
               id: executionId,
               workflowId: workflow.id,
+              events: Array.isArray(response.result?.events) ? response.result.events : [],
+              aiTrace: response.result?.aiTrace || response.result?.ai_trace || execution.aiTrace,
               humanRequest: response.result?.humanRequest || response.result?.human_request || execution.humanRequest,
               input: { ...requestInputs, prompt: requestInputs.prompt ?? prompt },
             },
@@ -6066,6 +7514,7 @@
       refreshStatus()
         .then(async (status) => {
           if (status.authenticated) {
+            await ensureLocalRunnerStarted();
             await loadWorkflows();
             await syncPendingRuns();
             renderEmptyState();

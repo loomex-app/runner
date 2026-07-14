@@ -65,11 +65,11 @@ pub use management::{
     CredentialStore, DeviceLoginChallenge, HttpManagementApiClient, HumanRequestExecution,
     HumanRequestResolveResponse, HumanRequestSummary, LocalCredentialStore, ManagementApiClient,
     ManagementCredential, ManagementProjectRunnerBinding, Organization, Project,
-    ProjectRunnerBindingCreateRequest, Runner, RunnerUpsertRequest,
-    RunnerWorkflowExecutionListResponse, RunnerWorkflowExecutionResponse,
-    RunnerWorkflowInputSchemaResponse, RunnerWorkflowSummary, StreamCredentialRequest,
-    StreamCredentialResponse, SystemCredentialStore, WorkflowRunStartRequest,
-    WorkflowRunStartResponse, WorkspaceLoginResult,
+    ProjectRunnerBindingCreateRequest, Runner, RunnerJobEventCreateResponse, RunnerJobResponse,
+    RunnerSessionResponse, RunnerUpsertRequest, RunnerWorkflowExecutionListResponse,
+    RunnerWorkflowExecutionResponse, RunnerWorkflowInputSchemaResponse, RunnerWorkflowSummary,
+    StreamCredentialRequest, StreamCredentialResponse, SystemCredentialStore,
+    WorkflowRunStartRequest, WorkflowRunStartResponse, WorkspaceLoginResult,
 };
 pub use operational_readiness::{
     capacity_plan_for_runner_connections, evaluate_operational_alerts, evaluate_release_gate,

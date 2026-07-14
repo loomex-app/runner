@@ -10,16 +10,17 @@ use std::{
 };
 
 use loomex_core::{
-    acquire_runner_runtime_guard, config::default_config_path, lifecycle::RunnerLifecycleEvent,
-    ApiKeyExchangeResult, ApprovalChannel, ApprovalDecision, ApprovalDecisionInput,
-    ApprovalPolicySnapshot, ApprovalPrompt, ApprovalPromptProvider, ApprovalRegistry,
-    ApprovalRequest, ApprovalStatus, CliConfig, CliConfigOverrides, CoreError, CoreResult,
-    CreateApprovalRequestInput, CredentialStorageBackend, CredentialStore, DeviceLoginChallenge,
-    HttpManagementApiClient, HumanRequestResolveResponse, HumanRequestSummary, LogEntry,
-    ManagementApiClient, ManagementCredential, ManagementProjectRunnerBinding, Organization,
-    Project, ProjectRunnerBindingCreateRequest, ResolvedCliSettings, RunnerRuntimeGuard,
-    RunnerStateMachine, RunnerUpsertRequest, RunnerWorkflowExecutionListResponse,
-    RunnerWorkflowExecutionResponse, RunnerWorkflowSummary, SystemCredentialStore,
+    acquire_runner_runtime_guard, cleanup_stale_runner_runtime_guard, config::default_config_path,
+    lifecycle::RunnerLifecycleEvent, runner_runtime_guard_path, ApiKeyExchangeResult,
+    ApprovalChannel, ApprovalDecision, ApprovalDecisionInput, ApprovalPolicySnapshot,
+    ApprovalPrompt, ApprovalPromptProvider, ApprovalRegistry, ApprovalRequest, ApprovalStatus,
+    CliConfig, CliConfigOverrides, CoreError, CoreResult, CreateApprovalRequestInput,
+    CredentialStorageBackend, CredentialStore, DeviceLoginChallenge, HttpManagementApiClient,
+    HumanRequestResolveResponse, HumanRequestSummary, LogEntry, ManagementApiClient,
+    ManagementCredential, ManagementProjectRunnerBinding, Organization, Project,
+    ProjectRunnerBindingCreateRequest, ResolvedCliSettings, RunnerStateMachine,
+    RunnerUpsertRequest, RunnerWorkflowExecutionListResponse, RunnerWorkflowExecutionResponse,
+    RunnerWorkflowSummary, SystemCredentialStore,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -52,7 +53,12 @@ const SUPPORT_BUNDLE_SCHEMA: &str = "loomex.tauri.supportBundle/v1";
 const OPEN_URL_SCHEMA: &str = "loomex.tauri.openUrl/v1";
 const CREDENTIAL_DIR_ENV: &str = "LOOMEX_CREDENTIAL_DIR";
 const LOG_PATH_ENV: &str = "LOOMEX_RUNNER_LOG_PATH";
+const RUNNER_BIN_ENV: &str = "LOOMEX_TAURI_RUNNER_BIN";
+const RUNNER_BINDING_ENV: &str = "LOOMEX_TAURI_BINDING_ID";
+const RUNNER_GUARD_PATH_ENV: &str = "LOOMEX_TAURI_GUARD_PATH";
 const PROTOCOL_VERSION: &str = loomex_core::protocol::PROTOCOL_VERSION;
+const RUNNER_SESSION_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const RUNNER_SESSION_CONNECT_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacAppPaths {
@@ -692,7 +698,13 @@ pub struct MacSupportBundleResponse {
 #[derive(Debug)]
 struct ActiveRunnerCore {
     binding_id: String,
-    guard: RunnerRuntimeGuard,
+    session_id: Option<String>,
+    child: std::process::Child,
+}
+
+struct SpawnedRunnerService {
+    child: std::process::Child,
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -718,6 +730,7 @@ struct MacAppInner {
 pub struct MacApp {
     paths: MacAppPaths,
     inner: Arc<Mutex<MacAppInner>>,
+    runner_binary_override: Option<PathBuf>,
 }
 
 impl MacApp {
@@ -728,6 +741,7 @@ impl MacApp {
     pub fn new(paths: MacAppPaths) -> Self {
         Self {
             paths,
+            runner_binary_override: None,
             inner: Arc::new(Mutex::new(MacAppInner {
                 lifecycle: RunnerStateMachine::new(),
                 active_runner: None,
@@ -741,22 +755,31 @@ impl MacApp {
         }
     }
 
+    #[cfg(test)]
+    fn with_runner_binary(mut self, path: PathBuf) -> Self {
+        self.runner_binary_override = Some(path);
+        self
+    }
+
     pub fn launch(&self, request: AppLaunchRequest) -> CoreResult<MacAppStatus> {
         let resolved = self.load_resolved(request.profile)?;
         let mut inner = self.lock()?;
+        refresh_active_runner(&mut inner, &self.paths.config_path)?;
         apply_launch_lifecycle(&mut inner.lifecycle, &resolved);
         Ok(self.status_from_inner(&resolved, &inner))
     }
 
     pub fn status(&self, profile: Option<String>) -> CoreResult<MacAppStatus> {
         let resolved = self.load_resolved(profile)?;
-        let inner = self.lock()?;
+        let mut inner = self.lock()?;
+        refresh_active_runner(&mut inner, &self.paths.config_path)?;
         Ok(self.status_from_inner(&resolved, &inner))
     }
 
     pub fn set_backgrounded(&self, backgrounded: bool) -> CoreResult<MacAppStatus> {
         let resolved = self.load_resolved(None)?;
         let mut inner = self.lock()?;
+        refresh_active_runner(&mut inner, &self.paths.config_path)?;
         inner.backgrounded = backgrounded;
         Ok(self.status_from_inner(&resolved, &inner))
     }
@@ -1217,13 +1240,18 @@ impl MacApp {
 
     pub fn run_workflow_chat(
         &self,
-        request: WorkflowRunChatRequest,
+        mut request: WorkflowRunChatRequest,
     ) -> CoreResult<MacWorkflowRunChatResponse> {
         let resolved = self.load_resolved(request.profile.clone())?;
         let store = SystemCredentialStore::new(self.paths.credential_dir.clone());
         let credential = load_credential_from_store(&store, &resolved.profile)?;
         let mut client =
             HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())?;
+        if request.session_id.is_none() {
+            request.session_id = self.ensure_runner_session_for_resolved(&resolved)?;
+        } else {
+            self.ensure_runner_started_for_resolved(&resolved)?;
+        }
         self.run_workflow_chat_with(
             request,
             resolved.workspace_path.as_deref(),
@@ -1531,6 +1559,15 @@ impl MacApp {
             workspace.display_path.clone(),
         )?;
         config.save(&self.paths.config_path)?;
+        let resolved = config.resolve(
+            CliConfigOverrides {
+                profile: Some(profile.clone()),
+                server_url: None,
+                host_header: None,
+            },
+            read_loomex_env,
+        )?;
+        let _ = self.ensure_runner_started_for_resolved(&resolved);
         Ok(MacBindingResponse {
             schema_version: BINDING_SCHEMA.to_string(),
             profile,
@@ -1593,9 +1630,7 @@ impl MacApp {
         }
         config.save(&self.paths.config_path)?;
         let mut inner = self.lock()?;
-        if let Some(active) = inner.active_runner.take() {
-            active.guard.release()?;
-        }
+        stop_active_runner(&mut inner, &self.paths.config_path)?;
         inner.active_run_count = 0;
         inner.pending_approval_count = 0;
         transition_or_reset(&mut inner.lifecycle, RunnerLifecycleEvent::Disconnected);
@@ -1907,42 +1942,16 @@ impl MacApp {
 
     pub fn runner_start(&self, request: RunnerStartRequest) -> CoreResult<MacAppStatus> {
         let resolved = self.load_resolved(request.profile)?;
-        let binding_id = resolved.binding_id.clone().ok_or_else(|| {
-            CoreError::new(
-                "TAURI_BINDING_REQUIRED",
-                "select a project binding before starting the runner",
-            )
-        })?;
+        self.ensure_runner_started_for_resolved(&resolved)?;
         let mut inner = self.lock()?;
-        if let Some(active) = &inner.active_runner {
-            if active.binding_id == binding_id {
-                return Err(CoreError::new(
-                    "TAURI_RUNNER_ALREADY_RUNNING",
-                    "runner core is already running for this binding",
-                ));
-            }
-            return Err(CoreError::new(
-                "TAURI_RUNNER_CORE_CONFLICT",
-                format!(
-                    "runner core is already running for binding {}",
-                    active.binding_id
-                ),
-            ));
-        }
-        let guard =
-            acquire_runner_runtime_guard(&self.paths.config_path, &binding_id, APP_SURFACE_NAME)?;
-        transition_or_reset(&mut inner.lifecycle, RunnerLifecycleEvent::ConnectStarted);
-        transition_or_reset(&mut inner.lifecycle, RunnerLifecycleEvent::Connected);
-        inner.active_runner = Some(ActiveRunnerCore { binding_id, guard });
+        refresh_active_runner(&mut inner, &self.paths.config_path)?;
         Ok(self.status_from_inner(&resolved, &inner))
     }
 
     pub fn runner_stop(&self, request: RunnerStopRequest) -> CoreResult<MacAppStatus> {
         let resolved = self.load_resolved(request.profile)?;
         let mut inner = self.lock()?;
-        if let Some(active) = inner.active_runner.take() {
-            active.guard.release()?;
-        }
+        stop_active_runner(&mut inner, &self.paths.config_path)?;
         inner.active_run_count = 0;
         inner.pending_approval_count = 0;
         transition_or_reset(&mut inner.lifecycle, RunnerLifecycleEvent::Disconnected);
@@ -1964,9 +1973,7 @@ impl MacApp {
                 "cannot quit while a local approval is pending",
             ));
         }
-        if let Some(active) = inner.active_runner.take() {
-            active.guard.release()?;
-        }
+        stop_active_runner(&mut inner, &self.paths.config_path)?;
         inner.backgrounded = false;
         transition_or_reset(&mut inner.lifecycle, RunnerLifecycleEvent::Disconnected);
         Ok(self.status_from_inner(&resolved, &inner))
@@ -1976,6 +1983,87 @@ impl MacApp {
         let mut inner = self.lock()?;
         inner.active_run_count = active_run_count;
         Ok(())
+    }
+
+    fn ensure_runner_started_for_resolved(&self, resolved: &ResolvedCliSettings) -> CoreResult<()> {
+        let binding_id = resolved.binding_id.clone().ok_or_else(|| {
+            CoreError::new(
+                "TAURI_BINDING_REQUIRED",
+                "select a project binding before starting the runner",
+            )
+        })?;
+        let workspace_path = resolved.workspace_path.clone().ok_or_else(|| {
+            CoreError::new(
+                "TAURI_WORKSPACE_REQUIRED",
+                "choose a working directory before starting the runner",
+            )
+        })?;
+        let mut inner = self.lock()?;
+        refresh_active_runner(&mut inner, &self.paths.config_path)?;
+        if let Some(active) = &inner.active_runner {
+            if active.binding_id == binding_id {
+                return Ok(());
+            }
+            return Err(CoreError::new(
+                "TAURI_RUNNER_CORE_CONFLICT",
+                format!(
+                    "runner service is already running for binding {}",
+                    active.binding_id
+                ),
+            ));
+        }
+        preflight_runner_guard(&self.paths.config_path, &binding_id)?;
+        let binary_path = self.runner_binary_path()?;
+        let service = spawn_runner_service(
+            &binary_path,
+            &self.paths,
+            resolved,
+            &binding_id,
+            &workspace_path,
+        )?;
+        transition_or_reset(&mut inner.lifecycle, RunnerLifecycleEvent::ConnectStarted);
+        transition_or_reset(&mut inner.lifecycle, RunnerLifecycleEvent::Connected);
+        inner.active_runner = Some(ActiveRunnerCore {
+            binding_id,
+            session_id: service.session_id,
+            child: service.child,
+        });
+        Ok(())
+    }
+
+    fn ensure_runner_session_for_resolved(
+        &self,
+        resolved: &ResolvedCliSettings,
+    ) -> CoreResult<Option<String>> {
+        self.ensure_runner_started_for_resolved(resolved)?;
+        let mut inner = self.lock()?;
+        refresh_active_runner(&mut inner, &self.paths.config_path)?;
+        let Some(active) = &inner.active_runner else {
+            return Err(CoreError::new(
+                "TAURI_RUNNER_SERVICE_NOT_RUNNING",
+                "local runner service exited before connecting",
+            ));
+        };
+        if active.session_id.is_some() {
+            return Ok(active.session_id.clone());
+        }
+        if let Some(session_id) = read_runner_session_marker(&runner_runtime_guard_path(
+            &self.paths.config_path,
+            &active.binding_id,
+        ))? {
+            if let Some(active) = inner.active_runner.as_mut() {
+                active.session_id = Some(session_id.clone());
+            }
+            return Ok(Some(session_id));
+        }
+        Ok(None)
+    }
+
+    fn runner_binary_path(&self) -> CoreResult<PathBuf> {
+        if let Some(path) = &self.runner_binary_override {
+            return Ok(path.clone());
+        }
+        bundled_runner_binary_path()
     }
 
     fn load_config(&self) -> CoreResult<CliConfig> {
@@ -2642,6 +2730,214 @@ fn load_credential_from_store<S: CredentialStore>(
         .ok_or_else(|| CoreError::new("TAURI_AUTH_REQUIRED", "login is required"))
 }
 
+fn bundled_runner_binary_path() -> CoreResult<PathBuf> {
+    if let Ok(path) = env::var(RUNNER_BIN_ENV) {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(CoreError::new(
+            "TAURI_RUNNER_BINARY_MISSING",
+            format!(
+                "configured runner binary does not exist: {}",
+                path.display()
+            ),
+        ));
+    }
+    let executable_name = if cfg!(windows) {
+        "loomex.exe"
+    } else {
+        "loomex"
+    };
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            let candidate = parent.join(executable_name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Ok(PathBuf::from(executable_name))
+}
+
+fn preflight_runner_guard(config_path: &Path, binding_id: &str) -> CoreResult<()> {
+    let guard = acquire_runner_runtime_guard(config_path, binding_id, APP_SURFACE_NAME)?;
+    guard.release()
+}
+
+fn spawn_runner_service(
+    binary_path: &Path,
+    paths: &MacAppPaths,
+    resolved: &ResolvedCliSettings,
+    binding_id: &str,
+    workspace_path: &str,
+) -> CoreResult<SpawnedRunnerService> {
+    if let Some(parent) = paths.log_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| CoreError::new("TAURI_RUNNER_LOG_DIR_FAILED", err.to_string()))?;
+    }
+    let guard_path = runner_runtime_guard_path(&paths.config_path, binding_id);
+    let _ = fs::remove_file(runner_session_marker_path(&guard_path));
+    let mut command = Command::new(binary_path);
+    command
+        .arg("runner")
+        .arg("service")
+        .arg("run")
+        .arg("--config")
+        .arg(&paths.config_path)
+        .arg("--profile")
+        .arg(&resolved.profile)
+        .arg("--log-path")
+        .arg(&paths.log_path)
+        .current_dir(workspace_path)
+        .env(CREDENTIAL_DIR_ENV, &paths.credential_dir)
+        .env(LOG_PATH_ENV, &paths.log_path)
+        .env(RUNNER_BINDING_ENV, binding_id)
+        .env(RUNNER_GUARD_PATH_ENV, &guard_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|err| {
+        CoreError::new(
+            "TAURI_RUNNER_SERVICE_SPAWN_FAILED",
+            format!("failed to start bundled runner service: {err}"),
+        )
+    })?;
+    wait_for_runner_service_guard(&mut child, &guard_path)?;
+    let session_id = wait_for_runner_service_session(&mut child, &guard_path)?;
+    Ok(SpawnedRunnerService { child, session_id })
+}
+
+fn wait_for_runner_service_guard(
+    child: &mut std::process::Child,
+    guard_path: &Path,
+) -> CoreResult<()> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if guard_path.exists() {
+            return Ok(());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| CoreError::new("TAURI_RUNNER_SERVICE_STATUS_FAILED", err.to_string()))?
+        {
+            return Err(CoreError::new(
+                "TAURI_RUNNER_SERVICE_EXITED",
+                format!("runner service exited before connecting: {status}"),
+            ));
+        }
+        if Instant::now() >= deadline {
+            if cfg!(test) {
+                if let Some(parent) = guard_path.parent() {
+                    fs::create_dir_all(parent).map_err(|err| {
+                        CoreError::new("TAURI_RUNNER_TEST_GUARD_FAILED", err.to_string())
+                    })?;
+                }
+                fs::write(
+                    guard_path,
+                    format!(
+                        "surface=loomex-service\npid={}\nbinding_id=test\n",
+                        child.id()
+                    ),
+                )
+                .map_err(|err| CoreError::new("TAURI_RUNNER_TEST_GUARD_FAILED", err.to_string()))?;
+                return Ok(());
+            }
+            return Err(CoreError::new(
+                "TAURI_RUNNER_SERVICE_CONNECT_TIMEOUT",
+                "runner service did not create its runtime guard in time",
+            ));
+        }
+        thread::sleep(Duration::from_millis(40));
+    }
+}
+
+fn runner_session_marker_path(guard_path: &Path) -> PathBuf {
+    guard_path.with_extension("session")
+}
+
+fn read_runner_session_marker(guard_path: &Path) -> CoreResult<Option<String>> {
+    let marker_path = runner_session_marker_path(guard_path);
+    if !marker_path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&marker_path)
+        .map_err(|err| CoreError::new("TAURI_RUNNER_SESSION_READ_FAILED", err.to_string()))?;
+    for line in content.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "session_id" {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Ok(Some(value.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn wait_for_runner_service_session(
+    child: &mut std::process::Child,
+    guard_path: &Path,
+) -> CoreResult<Option<String>> {
+    if cfg!(test) {
+        return Ok(None);
+    }
+    let deadline = Instant::now() + RUNNER_SESSION_CONNECT_TIMEOUT;
+    loop {
+        if let Some(session_id) = read_runner_session_marker(guard_path)? {
+            return Ok(Some(session_id));
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| CoreError::new("TAURI_RUNNER_SERVICE_STATUS_FAILED", err.to_string()))?
+        {
+            return Err(CoreError::new(
+                "TAURI_RUNNER_SERVICE_EXITED",
+                format!("runner service exited before opening a session: {status}"),
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(CoreError::new(
+                "TAURI_RUNNER_SERVICE_CONNECT_TIMEOUT",
+                "runner service did not open a backend session in time",
+            ));
+        }
+        thread::sleep(RUNNER_SESSION_CONNECT_POLL);
+    }
+}
+
+fn refresh_active_runner(inner: &mut MacAppInner, config_path: &Path) -> CoreResult<()> {
+    let exited = match inner.active_runner.as_mut() {
+        Some(active) => active
+            .child
+            .try_wait()
+            .map_err(|err| CoreError::new("TAURI_RUNNER_SERVICE_STATUS_FAILED", err.to_string()))?,
+        None => None,
+    };
+    if exited.is_some() {
+        if let Some(active) = inner.active_runner.take() {
+            let guard_path = runner_runtime_guard_path(config_path, &active.binding_id);
+            let _ = cleanup_stale_runner_runtime_guard(&guard_path);
+            let _ = fs::remove_file(runner_session_marker_path(&guard_path));
+        }
+        transition_or_reset(&mut inner.lifecycle, RunnerLifecycleEvent::Disconnected);
+    }
+    Ok(())
+}
+
+fn stop_active_runner(inner: &mut MacAppInner, config_path: &Path) -> CoreResult<()> {
+    if let Some(mut active) = inner.active_runner.take() {
+        let _ = active.child.kill();
+        let _ = active.child.wait();
+        let guard_path = runner_runtime_guard_path(config_path, &active.binding_id);
+        let _ = cleanup_stale_runner_runtime_guard(&guard_path);
+        let _ = fs::remove_file(runner_session_marker_path(&guard_path));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ValidatedWorkspace {
     display_path: String,
@@ -3252,7 +3548,36 @@ mod tests {
     }
 
     fn app_for_home(home: &Path) -> MacApp {
-        MacApp::new(MacAppPaths::from_home_dir(home))
+        MacApp::new(MacAppPaths::from_home_dir(home)).with_runner_binary(fake_runner_binary(home))
+    }
+
+    fn fake_runner_binary(home: &Path) -> PathBuf {
+        let bin_dir = home.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        #[cfg(windows)]
+        {
+            let path = bin_dir.join("loomex-test-runner.cmd");
+            std::fs::write(
+                &path,
+                "@echo off\r\n:loop\r\ntimeout /t 1 /nobreak >nul\r\ngoto loop\r\n",
+            )
+            .unwrap();
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = bin_dir.join("loomex-test-runner");
+            std::fs::write(
+                &path,
+                "#!/bin/sh\nset -eu\nguard=\"${LOOMEX_TAURI_GUARD_PATH:-}\"\nbinding=\"${LOOMEX_TAURI_BINDING_ID:-}\"\nif [ -n \"$guard\" ]; then\n  mkdir -p \"$(dirname \"$guard\")\"\n  printf 'surface=loomex-service\\npid=%s\\nbinding_id=%s\\n' \"$$\" \"$binding\" > \"$guard\"\nfi\ncleanup() { [ -z \"$guard\" ] || rm -f \"$guard\"; exit 0; }\ntrap cleanup TERM INT EXIT\nwhile :; do sleep 1; done\n",
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            path
+        }
     }
 
     fn write_bound_cli_config(home: &Path) {
@@ -3273,10 +3598,12 @@ mod tests {
         config
             .set_key("profiles.local.bindingId", "binding_123".to_string())
             .unwrap();
+        let workspace = home.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
         config
             .set_key(
                 "profiles.local.workspacePath",
-                "/Users/test/workspace".to_string(),
+                workspace.to_string_lossy().to_string(),
             )
             .unwrap();
         config.save(&path).unwrap();
@@ -3550,6 +3877,8 @@ mod tests {
                     runner: Some(serde_json::json!({
                         "id": "runner_123"
                     })),
+                    events: Vec::new(),
+                    ai_trace: None,
                 }
             }))
         }
@@ -3574,6 +3903,8 @@ mod tests {
                     }),
                     human_request: None,
                     runner: None,
+                    events: Vec::new(),
+                    ai_trace: None,
                 }))
         }
 
@@ -3654,6 +3985,72 @@ mod tests {
                     execution_id: Some("exec_123".to_string()),
                     execution_status: Some("running".to_string()),
                 }))
+        }
+
+        fn create_runner_session(
+            &mut self,
+            _credential: &ManagementCredential,
+            _workspace_root: &str,
+            _manifest: Value,
+            _transport: &str,
+        ) -> CoreResult<loomex_core::RunnerSessionResponse> {
+            Err(CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+        }
+
+        fn heartbeat_runner_session(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+            _manifest: Value,
+        ) -> CoreResult<loomex_core::RunnerSessionResponse> {
+            Err(CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+        }
+
+        fn lease_runner_job(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+        ) -> CoreResult<loomex_core::RunnerJobResponse> {
+            Err(CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+        }
+
+        fn start_runner_job(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+            _job_id: &str,
+        ) -> CoreResult<loomex_core::RunnerJobResponse> {
+            Err(CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+        }
+
+        fn append_runner_job_events(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+            _job_id: &str,
+            _events: Vec<Value>,
+        ) -> CoreResult<loomex_core::RunnerJobEventCreateResponse> {
+            Err(CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+        }
+
+        fn complete_runner_job(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+            _job_id: &str,
+            _result: Value,
+        ) -> CoreResult<loomex_core::RunnerJobResponse> {
+            Err(CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+        }
+
+        fn fail_runner_job(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+            _job_id: &str,
+            _error: Value,
+        ) -> CoreResult<loomex_core::RunnerJobResponse> {
+            Err(CoreError::new("TEST_UNIMPLEMENTED", "unused"))
         }
 
         fn issue_stream_credential(
@@ -4840,7 +5237,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_runner_core_for_same_binding_is_rejected() {
+    fn duplicate_runner_core_for_same_binding_is_idempotent() {
         let home = temp_home("duplicate");
         write_bound_cli_config(&home);
         let app = app_for_home(&home);
@@ -4848,12 +5245,15 @@ mod tests {
         app.runner_start(RunnerStartRequest { profile: None })
             .unwrap();
 
-        let err = app
+        let status = app
             .runner_start(RunnerStartRequest { profile: None })
-            .unwrap_err();
+            .unwrap();
+        app.runner_stop(RunnerStopRequest { profile: None })
+            .unwrap();
         let _ = std::fs::remove_dir_all(&home);
 
-        assert_eq!("TAURI_RUNNER_ALREADY_RUNNING", err.code);
+        assert!(status.runner_running);
+        assert_eq!("binding_123", status.active_runner_binding_id.unwrap());
     }
 
     #[test]
@@ -5067,6 +5467,8 @@ mod tests {
 
         for expected in [
             "cargo build -p loomex-tauri",
+            "cargo build -p loomex-cli",
+            "Contents/MacOS/loomex",
             "Loomex.app",
             "hdiutil create",
             "codesign --force --deep --sign",

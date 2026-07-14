@@ -200,6 +200,10 @@ pub struct RunnerWorkflowExecutionResponse {
     pub human_request: Option<Value>,
     #[serde(default)]
     pub runner: Option<Value>,
+    #[serde(default)]
+    pub events: Vec<Value>,
+    #[serde(default, rename = "aiTrace", alias = "ai_trace")]
+    pub ai_trace: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -218,6 +222,23 @@ pub struct RunnerWorkflowInputSchemaResponse {
     pub selected_version: Option<Value>,
     #[serde(default)]
     pub versions: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunnerSessionResponse {
+    pub runner: Value,
+    pub session: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunnerJobResponse {
+    pub job: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunnerJobEventCreateResponse {
+    #[serde(default)]
+    pub events: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -870,6 +891,51 @@ pub trait ManagementApiClient {
         request_id: &str,
         payload: &Value,
     ) -> CoreResult<HumanRequestResolveResponse>;
+    fn create_runner_session(
+        &mut self,
+        credential: &ManagementCredential,
+        workspace_root: &str,
+        manifest: Value,
+        transport: &str,
+    ) -> CoreResult<RunnerSessionResponse>;
+    fn heartbeat_runner_session(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+        manifest: Value,
+    ) -> CoreResult<RunnerSessionResponse>;
+    fn lease_runner_job(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+    ) -> CoreResult<RunnerJobResponse>;
+    fn start_runner_job(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+        job_id: &str,
+    ) -> CoreResult<RunnerJobResponse>;
+    fn append_runner_job_events(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+        job_id: &str,
+        events: Vec<Value>,
+    ) -> CoreResult<RunnerJobEventCreateResponse>;
+    fn complete_runner_job(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+        job_id: &str,
+        result: Value,
+    ) -> CoreResult<RunnerJobResponse>;
+    fn fail_runner_job(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+        job_id: &str,
+        error: Value,
+    ) -> CoreResult<RunnerJobResponse>;
     fn issue_stream_credential(
         &mut self,
         credential: &ManagementCredential,
@@ -1420,6 +1486,148 @@ impl ManagementApiClient for HttpManagementApiClient {
         Ok(envelope.data)
     }
 
+    fn create_runner_session(
+        &mut self,
+        credential: &ManagementCredential,
+        workspace_root: &str,
+        manifest: Value,
+        transport: &str,
+    ) -> CoreResult<RunnerSessionResponse> {
+        let response = self
+            .post_with_auth("/runner-control/runner/v1/sessions/", credential)
+            .json(&serde_json::json!({
+                "workspaceRoot": workspace_root,
+                "manifest": manifest,
+                "transport": transport,
+            }))
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerSessionResponse> = parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
+    fn heartbeat_runner_session(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+        manifest: Value,
+    ) -> CoreResult<RunnerSessionResponse> {
+        let response = self
+            .post_with_auth(
+                &format!(
+                    "/runner-control/runner/v1/sessions/{}/heartbeat/",
+                    encode_path(session_id)
+                ),
+                credential,
+            )
+            .json(&serde_json::json!({ "manifest": manifest }))
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerSessionResponse> = parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
+    fn lease_runner_job(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+    ) -> CoreResult<RunnerJobResponse> {
+        let response = self
+            .post_with_auth("/runner-control/runner/v1/jobs/lease/", credential)
+            .json(&serde_json::json!({ "sessionId": session_id }))
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerJobResponse> = parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
+    fn start_runner_job(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+        job_id: &str,
+    ) -> CoreResult<RunnerJobResponse> {
+        let response = self
+            .post_with_auth(
+                &format!(
+                    "/runner-control/runner/v1/jobs/{}/start/",
+                    encode_path(job_id)
+                ),
+                credential,
+            )
+            .json(&serde_json::json!({ "sessionId": session_id }))
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerJobResponse> = parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
+    fn append_runner_job_events(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+        job_id: &str,
+        events: Vec<Value>,
+    ) -> CoreResult<RunnerJobEventCreateResponse> {
+        let response = self
+            .post_with_auth(
+                &format!(
+                    "/runner-control/runner/v1/jobs/{}/events/",
+                    encode_path(job_id)
+                ),
+                credential,
+            )
+            .json(&serde_json::json!({ "sessionId": session_id, "events": events }))
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerJobEventCreateResponse> = parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
+    fn complete_runner_job(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+        job_id: &str,
+        result: Value,
+    ) -> CoreResult<RunnerJobResponse> {
+        let response = self
+            .post_with_auth(
+                &format!(
+                    "/runner-control/runner/v1/jobs/{}/complete/",
+                    encode_path(job_id)
+                ),
+                credential,
+            )
+            .json(&serde_json::json!({ "sessionId": session_id, "result": result }))
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerJobResponse> = parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
+    fn fail_runner_job(
+        &mut self,
+        credential: &ManagementCredential,
+        session_id: &str,
+        job_id: &str,
+        error: Value,
+    ) -> CoreResult<RunnerJobResponse> {
+        let response = self
+            .post_with_auth(
+                &format!(
+                    "/runner-control/runner/v1/jobs/{}/fail/",
+                    encode_path(job_id)
+                ),
+                credential,
+            )
+            .json(&serde_json::json!({ "sessionId": session_id, "error": error }))
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerJobResponse> = parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
     fn issue_stream_credential(
         &mut self,
         credential: &ManagementCredential,
@@ -1468,14 +1676,30 @@ fn parse_empty_response(response: reqwest::blocking::Response) -> CoreResult<()>
 struct ErrorResponse {
     code: String,
     message: String,
+    #[serde(default)]
     request_id: String,
     details: Option<Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ErrorEnvelopeResponse {
+    error: ErrorResponse,
+}
+
 fn management_error_from_status_and_body(status: u16, body: &str) -> CoreError {
-    if let Ok(error) = serde_json::from_str::<ErrorResponse>(body) {
+    let parsed = serde_json::from_str::<ErrorResponse>(body)
+        .ok()
+        .or_else(|| {
+            serde_json::from_str::<ErrorEnvelopeResponse>(body)
+                .ok()
+                .map(|envelope| envelope.error)
+        });
+    if let Some(error) = parsed {
         let code: &'static str = Box::leak(error.code.into_boxed_str());
-        let mut message = format!("{} request_id={}", error.message, error.request_id);
+        let mut message = error.message;
+        if !error.request_id.is_empty() {
+            message.push_str(&format!(" request_id={}", error.request_id));
+        }
         if let Some(details) = error.details {
             message.push_str(&format!(" details={details}"));
         }
@@ -1708,6 +1932,30 @@ mod tests {
     }
 
     #[test]
+    fn runner_workflow_execution_response_preserves_ai_trace() {
+        let response = serde_json::from_str::<RunnerWorkflowExecutionResponse>(
+            r#"{
+                "execution": {"id": "exec_123", "status": "running"},
+                "aiTrace": {
+                    "schemaVersion": "loomex.runner.aiTrace/v1",
+                    "events": [{"sequence": 1, "type": "ai.message.completed", "content": "done"}]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            response
+                .ai_trace
+                .as_ref()
+                .and_then(|trace| trace.get("events"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn unauthorized_error_envelope_preserves_contract_code() {
         let err = management_error_from_status_and_body(
             401,
@@ -1717,5 +1965,19 @@ mod tests {
         assert_eq!("AUTH_TOKEN_EXPIRED", err.code);
         assert!(err.message.contains("Token expired"));
         assert!(err.message.contains("request_id=req_auth"));
+    }
+
+    #[test]
+    fn nested_management_error_envelope_preserves_contract_code() {
+        let err = management_error_from_status_and_body(
+            422,
+            r#"{"error":{"code":"LOCAL_RUNNER_REQUIRED","message":"Local workflow execution requires an online project runner.","details":{}},"meta":{"correlationId":"req_nested","version":"v1"}}"#,
+        );
+
+        assert_eq!("LOCAL_RUNNER_REQUIRED", err.code);
+        assert!(err
+            .message
+            .contains("Local workflow execution requires an online project runner."));
+        assert!(!err.message.contains("management API returned HTTP 422"));
     }
 }

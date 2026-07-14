@@ -31,6 +31,7 @@ const DEFAULT_LOG_LIMIT: usize = 100;
 const LOG_PATH_ENV: &str = "LOOMEX_RUNNER_LOG_PATH";
 const CONFIG_PATH_ENV: &str = "LOOMEX_CONFIG_PATH";
 const CREDENTIAL_DIR_ENV: &str = "LOOMEX_CREDENTIAL_DIR";
+const RUNNER_GUARD_PATH_ENV: &str = "LOOMEX_TAURI_GUARD_PATH";
 const DEFAULT_DEVICE_LOGIN_TIMEOUT_SECONDS: u64 = 600;
 const MANAGEMENT_TOKEN_CLOCK_SKEW_SECONDS: u64 = 300;
 const DEFAULT_FOLLOW_POLL_INTERVAL_MS: u64 = 500;
@@ -2056,6 +2057,7 @@ impl ServiceCommandRunner for OsServiceCommandRunner {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunnerServiceRuntimeConfig {
     profile: String,
@@ -2075,6 +2077,7 @@ struct RunnerServiceRuntimeStart {
     fallback: bool,
 }
 
+#[allow(dead_code)]
 trait RunnerServiceRuntimeLauncher {
     fn start_once(
         &mut self,
@@ -2445,7 +2448,7 @@ fn run_runner_service_run_parsed<C: ManagementApiClient>(
     resolved: &loomex_core::ResolvedCliSettings,
     store: &dyn CredentialStore,
     client: &mut C,
-    launcher: &mut dyn RunnerServiceRuntimeLauncher,
+    _launcher: &mut dyn RunnerServiceRuntimeLauncher,
 ) -> Result<String, String> {
     if let Some(log_path) = &service_options.log_path {
         env::set_var(LOG_PATH_ENV, log_path);
@@ -2460,9 +2463,7 @@ fn run_runner_service_run_parsed<C: ManagementApiClient>(
         acquire_runner_runtime_guard(&service_options.config_path, binding_id, "loomex-service")
             .map_err(format_core_error)?;
     if service_options.once {
-        let runtime_config =
-            build_runner_service_runtime_config(client, &credential, resolved, binding_id)?;
-        let start = launcher.start_once(runtime_config)?;
+        let start = run_runner_control_service_once(client, &credential, resolved, binding_id)?;
         if options.json {
             return Ok(json!({
                 "schemaVersion": "loomex.cli.runnerServiceRun/v1",
@@ -2470,7 +2471,7 @@ fn run_runner_service_run_parsed<C: ManagementApiClient>(
                 "once": true,
                 "transport": start.transport,
                 "event": start.event,
-                "fallback": start.fallback,
+                "fallback": false,
                 "profile": resolved.profile,
                 "bindingId": binding_id,
                 "guardPath": guard.path()
@@ -2482,17 +2483,387 @@ fn run_runner_service_run_parsed<C: ManagementApiClient>(
             guard.path().display()
         ));
     }
-    run_runner_service_reconnect_loop(
-        client,
-        &credential,
-        resolved,
-        binding_id,
-        launcher,
-        None,
-        thread::sleep,
-    )?;
+    run_runner_control_service_loop(client, &credential, resolved, binding_id)?;
     drop(guard);
     Ok(String::new())
+}
+
+fn run_runner_control_service_once<C: ManagementApiClient>(
+    client: &mut C,
+    credential: &ManagementCredential,
+    resolved: &loomex_core::ResolvedCliSettings,
+    binding_id: &str,
+) -> Result<RunnerServiceRuntimeStart, String> {
+    let session = create_runner_control_session(client, credential, resolved, binding_id)?;
+    let session_id = session_id_from_response(&session)?;
+    write_runner_session_marker(&session_id);
+    let event = match process_one_runner_control_job(client, credential, resolved, &session_id)? {
+        true => "job.processed",
+        false => "idle",
+    };
+    Ok(RunnerServiceRuntimeStart {
+        transport: "runner_control_long_poll".to_string(),
+        event: event.to_string(),
+        fallback: false,
+    })
+}
+
+fn run_runner_control_service_loop<C: ManagementApiClient>(
+    client: &mut C,
+    credential: &ManagementCredential,
+    resolved: &loomex_core::ResolvedCliSettings,
+    binding_id: &str,
+) -> Result<(), String> {
+    let session = create_runner_control_session(client, credential, resolved, binding_id)?;
+    let session_id = session_id_from_response(&session)?;
+    write_runner_session_marker(&session_id);
+    eprintln!("runner control session connected: {session_id}");
+    let mut idle_ticks = 0usize;
+    loop {
+        let processed = process_one_runner_control_job(client, credential, resolved, &session_id)?;
+        if processed {
+            idle_ticks = 0;
+        } else {
+            idle_ticks += 1;
+            if idle_ticks % 10 == 0 {
+                let _ = client.heartbeat_runner_session(
+                    credential,
+                    &session_id,
+                    runner_control_manifest(resolved, binding_id),
+                );
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+}
+
+fn create_runner_control_session<C: ManagementApiClient>(
+    client: &mut C,
+    credential: &ManagementCredential,
+    resolved: &loomex_core::ResolvedCliSettings,
+    binding_id: &str,
+) -> Result<loomex_core::RunnerSessionResponse, String> {
+    let workspace_root = resolved.workspace_path.as_deref().ok_or_else(|| {
+        "RUNNER_SERVICE_WORKSPACE_REQUIRED: selected profile has no workspacePath".to_string()
+    })?;
+    client
+        .create_runner_session(
+            credential,
+            workspace_root,
+            runner_control_manifest(resolved, binding_id),
+            "long_poll",
+        )
+        .map_err(format_core_error)
+}
+
+fn runner_control_manifest(resolved: &loomex_core::ResolvedCliSettings, binding_id: &str) -> Value {
+    json!({
+        "runnerVersion": env!("CARGO_PKG_VERSION"),
+        "bindingId": binding_id,
+        "workspaceRoot": resolved.workspace_path.clone().unwrap_or_default(),
+        "capabilities": {
+            "file.list": true,
+            "file.read_many": true,
+            "file.write_many": true,
+            "fs.write": true
+        }
+    })
+}
+
+fn session_id_from_response(
+    response: &loomex_core::RunnerSessionResponse,
+) -> Result<String, String> {
+    response
+        .session
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "RUNNER_SERVICE_SESSION_INVALID: session id missing".to_string())
+}
+
+fn runner_session_marker_path(guard_path: &Path) -> PathBuf {
+    guard_path.with_extension("session")
+}
+
+fn write_runner_session_marker(session_id: &str) {
+    let Ok(guard_path) = env::var(RUNNER_GUARD_PATH_ENV) else {
+        return;
+    };
+    let marker_path = runner_session_marker_path(Path::new(&guard_path));
+    if let Some(parent) = marker_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(marker_path, format!("session_id={session_id}\n"));
+}
+
+fn process_one_runner_control_job<C: ManagementApiClient>(
+    client: &mut C,
+    credential: &ManagementCredential,
+    resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
+) -> Result<bool, String> {
+    let lease = client
+        .lease_runner_job(credential, session_id)
+        .map_err(format_core_error)?;
+    let Some(job) = lease.job else {
+        return Ok(false);
+    };
+    let job_id = job_id(&job)?;
+    client
+        .start_runner_job(credential, session_id, &job_id)
+        .map_err(format_core_error)?;
+    match execute_runner_control_job(resolved, &job) {
+        Ok(result) => {
+            let _ = client.append_runner_job_events(
+                credential,
+                session_id,
+                &job_id,
+                vec![json!({
+                    "eventType": "stdout",
+                    "stream": "stdout",
+                    "message": "job completed",
+                    "payload": result.clone()
+                })],
+            );
+            client
+                .complete_runner_job(credential, session_id, &job_id, result)
+                .map_err(format_core_error)?;
+        }
+        Err(err) => {
+            let error = json!({"code": "RUNNER_JOB_EXECUTION_FAILED", "message": err});
+            let _ = client.append_runner_job_events(
+                credential,
+                session_id,
+                &job_id,
+                vec![json!({
+                    "eventType": "stderr",
+                    "stream": "stderr",
+                    "message": error["message"].as_str().unwrap_or("job failed"),
+                    "payload": error.clone()
+                })],
+            );
+            client
+                .fail_runner_job(credential, session_id, &job_id, error)
+                .map_err(format_core_error)?;
+        }
+    }
+    Ok(true)
+}
+
+fn job_id(job: &Value) -> Result<String, String> {
+    job.get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "RUNNER_JOB_INVALID: job id missing".to_string())
+}
+
+fn execute_runner_control_job(
+    resolved: &loomex_core::ResolvedCliSettings,
+    job: &Value,
+) -> Result<Value, String> {
+    let kind = job.get("kind").and_then(Value::as_str).unwrap_or_default();
+    match kind {
+        "file.list" => execute_file_list_job(resolved, job),
+        "file.read_many" => execute_file_read_many_job(resolved, job),
+        "file.write_many" => execute_file_write_many_job(resolved, job),
+        other => Err(format!("unsupported runner job kind {other}")),
+    }
+}
+
+fn runner_workspace_root(resolved: &loomex_core::ResolvedCliSettings) -> Result<PathBuf, String> {
+    PathBuf::from(resolved.workspace_path.as_deref().ok_or_else(|| {
+        "RUNNER_SERVICE_WORKSPACE_REQUIRED: selected profile has no workspacePath".to_string()
+    })?)
+    .canonicalize()
+    .map_err(|err| format!("workspace path is not accessible: {err}"))
+}
+
+fn execute_file_list_job(
+    resolved: &loomex_core::ResolvedCliSettings,
+    job: &Value,
+) -> Result<Value, String> {
+    let workspace_root = runner_workspace_root(resolved)?;
+    let payload = job.get("payload").and_then(Value::as_object);
+    let raw_path = payload
+        .and_then(|payload| payload.get("path"))
+        .and_then(Value::as_str)
+        .unwrap_or(".");
+    let limit = payload
+        .and_then(|payload| payload.get("limit"))
+        .and_then(Value::as_u64)
+        .unwrap_or(200) as usize;
+    let include_hidden = payload
+        .and_then(|payload| payload.get("includeHidden"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let root = safe_runner_path(&workspace_root, raw_path)?;
+    let mut files = Vec::new();
+    let max_entries = limit.max(1);
+    collect_runner_file_entries(
+        &root,
+        &workspace_root,
+        &mut files,
+        max_entries,
+        include_hidden,
+    )
+    .map_err(|err| format!("failed to list files: {err}"))?;
+    let truncated = files.len() >= max_entries;
+    Ok(json!({ "files": files, "truncated": truncated }))
+}
+
+fn execute_file_read_many_job(
+    resolved: &loomex_core::ResolvedCliSettings,
+    job: &Value,
+) -> Result<Value, String> {
+    let workspace_root = runner_workspace_root(resolved)?;
+    let payload = job.get("payload").and_then(Value::as_object);
+    let files = payload
+        .and_then(|payload| payload.get("files"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "file.read_many job requires payload.files".to_string())?;
+    let max_bytes = payload
+        .and_then(|payload| payload.get("maxBytesPerFile"))
+        .and_then(Value::as_u64)
+        .unwrap_or(200_000) as usize;
+    let mut result = Vec::new();
+    for item in files {
+        let raw_path = item
+            .as_str()
+            .ok_or_else(|| "file.read_many files must contain paths".to_string())?;
+        let path = safe_runner_path(&workspace_root, raw_path)?;
+        let data = fs::read(&path).map_err(|err| format!("failed to read file: {err}"))?;
+        let truncated = data.len() > max_bytes;
+        let content_bytes = &data[..data.len().min(max_bytes)];
+        let relative = path
+            .strip_prefix(&workspace_root)
+            .map_err(|_| "read path escaped runner workspace".to_string())?;
+        result.push(json!({
+            "path": relative.to_string_lossy(),
+            "content": String::from_utf8_lossy(content_bytes),
+            "truncated": truncated
+        }));
+    }
+    Ok(json!({ "files": result }))
+}
+
+fn execute_file_write_many_job(
+    resolved: &loomex_core::ResolvedCliSettings,
+    job: &Value,
+) -> Result<Value, String> {
+    let workspace_root = runner_workspace_root(resolved)?;
+    let files = job
+        .get("payload")
+        .and_then(|payload| payload.get("files"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "file.write_many job requires payload.files".to_string())?;
+    let mut written = Vec::new();
+    for item in files {
+        let path = item
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "file entry missing path".to_string())?;
+        let relative = validate_runner_relative_path(path)?;
+        let destination = workspace_root.join(&relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create parent directory: {err}"))?;
+        }
+        let content = item
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if item.get("encoding").and_then(Value::as_str) == Some("base64") {
+            return Err(
+                "base64 file.write_many payloads are not supported by this runner".to_string(),
+            );
+        }
+        let bytes = content.as_bytes().to_vec();
+        fs::write(&destination, &bytes).map_err(|err| format!("failed to write file: {err}"))?;
+        written.push(json!({
+            "path": relative.to_string_lossy(),
+            "sizeBytes": bytes.len()
+        }));
+    }
+    Ok(json!({ "writtenFiles": written }))
+}
+
+fn safe_runner_path(workspace_root: &Path, path: &str) -> Result<PathBuf, String> {
+    let relative = validate_runner_relative_path(path)?;
+    let candidate = workspace_root.join(relative);
+    let resolved = if candidate.exists() {
+        candidate
+            .canonicalize()
+            .map_err(|err| format!("workspace path is not accessible: {err}"))?
+    } else {
+        candidate
+    };
+    if resolved != workspace_root && !resolved.starts_with(workspace_root) {
+        return Err("file path must stay inside runner workspace".to_string());
+    }
+    Ok(resolved)
+}
+
+fn collect_runner_file_entries(
+    root: &Path,
+    workspace_root: &Path,
+    files: &mut Vec<Value>,
+    limit: usize,
+    include_hidden: bool,
+) -> io::Result<()> {
+    if files.len() >= limit {
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        if files.len() >= limit {
+            break;
+        }
+        let path = entry.path();
+        let relative = path.strip_prefix(workspace_root).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "listed path escaped runner workspace",
+            )
+        })?;
+        if !include_hidden && relative_has_hidden_component(relative) {
+            continue;
+        }
+        let metadata = fs::metadata(&path)?;
+        let is_dir = metadata.is_dir();
+        files.push(json!({
+            "path": relative.to_string_lossy(),
+            "type": if is_dir { "directory" } else { "file" },
+            "sizeBytes": if metadata.is_file() { metadata.len() } else { 0 }
+        }));
+        if is_dir {
+            collect_runner_file_entries(&path, workspace_root, files, limit, include_hidden)?;
+        }
+    }
+    Ok(())
+}
+
+fn relative_has_hidden_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|part| part.starts_with('.'))
+    })
+}
+
+fn validate_runner_relative_path(path: &str) -> Result<PathBuf, String> {
+    let relative = PathBuf::from(path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("file path must be relative to the runner workspace".to_string());
+    }
+    Ok(relative)
 }
 
 fn format_runner_service_manifest(
@@ -2664,6 +3035,7 @@ fn command_plan_json(commands: &[ServiceCommand]) -> Vec<Value> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn build_runner_service_runtime_config<C: ManagementApiClient>(
     client: &mut C,
     credential: &ManagementCredential,
@@ -2716,6 +3088,7 @@ fn build_runner_service_runtime_config<C: ManagementApiClient>(
     })
 }
 
+#[allow(dead_code)]
 fn run_runner_service_reconnect_loop<C: ManagementApiClient>(
     client: &mut C,
     credential: &ManagementCredential,
@@ -2744,6 +3117,7 @@ fn run_runner_service_reconnect_loop<C: ManagementApiClient>(
     }
 }
 
+#[allow(dead_code)]
 fn is_terminal_service_runtime_error(error: &str) -> bool {
     let code = error_code_from_message(error);
     code.contains("AUTH")
@@ -2759,6 +3133,7 @@ fn is_terminal_service_runtime_error(error: &str) -> bool {
         || code.contains("OUT_OF_ORDER")
 }
 
+#[allow(dead_code)]
 fn run_service_transport_once(
     config: RunnerServiceRuntimeConfig,
 ) -> Result<RunnerServiceRuntimeStart, String> {
@@ -2778,6 +3153,7 @@ fn run_service_transport_once(
     })
 }
 
+#[allow(dead_code)]
 fn run_service_transport_until_disconnect(
     config: RunnerServiceRuntimeConfig,
 ) -> Result<(), String> {
@@ -2808,6 +3184,7 @@ fn run_service_transport_until_disconnect(
     })
 }
 
+#[allow(dead_code)]
 fn build_service_transport_runtime(
     config: RunnerServiceRuntimeConfig,
 ) -> Result<RunnerTransportRuntime, String> {
@@ -2857,6 +3234,7 @@ fn build_service_transport_runtime(
     Ok(RunnerTransportRuntime::new(connector, supervisor))
 }
 
+#[allow(dead_code)]
 fn websocket_config_from_grpc_endpoint(endpoint: &str) -> WebSocketClientConfig {
     let websocket_endpoint = if let Some(rest) = endpoint.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -5717,20 +6095,102 @@ mod tests {
         let parsed: Value = serde_json::from_str(&output).unwrap();
         let _ = fs::remove_file(&config_path);
         let _ = fs::remove_dir_all(&credential_root);
-        let started = launcher.started.unwrap();
 
         assert_eq!("loomex.cli.runnerServiceRun/v1", parsed["schemaVersion"]);
         assert_eq!(binding_id, parsed["bindingId"]);
-        assert_eq!("grpc", parsed["transport"]);
-        assert_eq!("Registered", parsed["event"]);
-        assert_eq!("binding_service_run_once_", &started.binding_id[..25]);
-        assert_eq!("/tmp/workspace", started.local_root_path);
-        assert_eq!("stream_secret", started.stream_credential.stream_token);
+        assert_eq!("runner_control_long_poll", parsed["transport"]);
+        assert_eq!("idle", parsed["event"]);
         assert_eq!(
             guard_path,
             PathBuf::from(parsed["guardPath"].as_str().unwrap())
         );
         assert!(!guard_path.exists());
+    }
+
+    #[test]
+    fn runner_service_run_once_writes_leased_file_job_to_workspace() {
+        let config_path = temp_config_path("service-run-file-job");
+        let credential_root = temp_credential_dir("service-run-file-job");
+        let workspace = temp_workspace_path("service-run-file-job");
+        fs::create_dir_all(&workspace).unwrap();
+        let binding_id = format!("binding_service_run_file_{}", process::id());
+        let store = LocalCredentialStore::new(credential_root.clone());
+        let mut config = CliConfig::default();
+        config
+            .set_key(
+                "profiles.default.serverUrl",
+                "https://loomex.app".to_string(),
+            )
+            .unwrap();
+        config
+            .set_key("profiles.default.organizationId", "org_123".to_string())
+            .unwrap();
+        config
+            .set_key("profiles.default.projectId", "prj_123".to_string())
+            .unwrap();
+        config
+            .set_key("profiles.default.runnerId", "runner_123".to_string())
+            .unwrap();
+        config
+            .set_key("profiles.default.bindingId", binding_id.clone())
+            .unwrap();
+        config
+            .set_key(
+                "profiles.default.workspacePath",
+                workspace.to_string_lossy().to_string(),
+            )
+            .unwrap();
+        config.save(&config_path).unwrap();
+        let mut service_credential = credential("default", "org_123");
+        service_credential.expires_at = "2099-01-01T00:00:00Z".to_string();
+        store.save(&service_credential).unwrap();
+        let mut client = FakeManagementClient {
+            runner_jobs: vec![json!({
+                "id": "job_123",
+                "kind": "file.write_many",
+                "payload": {
+                    "files": [{
+                        "path": "nested/output.txt",
+                        "content": "written by runner\n",
+                        "encoding": "utf-8"
+                    }]
+                }
+            })],
+            ..Default::default()
+        };
+        let mut launcher = TestRuntimeLauncher::default();
+
+        let output = run_runner_service_run_with(
+            &[
+                "--config".to_string(),
+                config_path.to_string_lossy().to_string(),
+                "--once".to_string(),
+            ],
+            &GlobalOptions {
+                json: true,
+                ..Default::default()
+            },
+            &store,
+            &mut client,
+            &mut launcher,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!("job.processed", parsed["event"]);
+        assert_eq!(
+            "written by runner\n",
+            fs::read_to_string(workspace.join("nested/output.txt")).unwrap()
+        );
+        assert_eq!("job_123", client.completed_runner_jobs[0]["id"]);
+        assert_eq!(
+            "nested/output.txt",
+            client.completed_runner_jobs[0]["result"]["writtenFiles"][0]["path"]
+        );
+
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_dir_all(&credential_root);
+        let _ = fs::remove_dir_all(&workspace);
     }
 
     #[test]
@@ -8789,6 +9249,10 @@ mod tests {
         last_workflow_request: Option<WorkflowRunStartRequest>,
         last_human_request_id: Option<String>,
         last_human_resolution: Option<Value>,
+        runner_session_response: Option<loomex_core::RunnerSessionResponse>,
+        runner_jobs: Vec<Value>,
+        completed_runner_jobs: Vec<Value>,
+        failed_runner_jobs: Vec<Value>,
     }
 
     struct FallingBackCredentialStore;
@@ -9085,6 +9549,97 @@ mod tests {
             })
         }
 
+        fn create_runner_session(
+            &mut self,
+            _credential: &ManagementCredential,
+            workspace_root: &str,
+            manifest: Value,
+            transport: &str,
+        ) -> loomex_core::CoreResult<loomex_core::RunnerSessionResponse> {
+            Ok(self.runner_session_response.clone().unwrap_or_else(|| {
+                loomex_core::RunnerSessionResponse {
+                    runner: json!({"id": "runner_123", "status": "online"}),
+                    session: json!({
+                        "id": "session_123",
+                        "transport": transport,
+                        "manifest": manifest,
+                        "workspaceRoot": workspace_root
+                    }),
+                }
+            }))
+        }
+
+        fn heartbeat_runner_session(
+            &mut self,
+            _credential: &ManagementCredential,
+            session_id: &str,
+            manifest: Value,
+        ) -> loomex_core::CoreResult<loomex_core::RunnerSessionResponse> {
+            Ok(loomex_core::RunnerSessionResponse {
+                runner: json!({"id": "runner_123", "status": "online"}),
+                session: json!({"id": session_id, "manifest": manifest}),
+            })
+        }
+
+        fn lease_runner_job(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+        ) -> loomex_core::CoreResult<loomex_core::RunnerJobResponse> {
+            Ok(loomex_core::RunnerJobResponse {
+                job: if self.runner_jobs.is_empty() {
+                    None
+                } else {
+                    Some(self.runner_jobs.remove(0))
+                },
+            })
+        }
+
+        fn start_runner_job(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+            job_id: &str,
+        ) -> loomex_core::CoreResult<loomex_core::RunnerJobResponse> {
+            Ok(loomex_core::RunnerJobResponse {
+                job: Some(json!({"id": job_id, "status": "running"})),
+            })
+        }
+
+        fn append_runner_job_events(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+            _job_id: &str,
+            events: Vec<Value>,
+        ) -> loomex_core::CoreResult<loomex_core::RunnerJobEventCreateResponse> {
+            Ok(loomex_core::RunnerJobEventCreateResponse { events })
+        }
+
+        fn complete_runner_job(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+            job_id: &str,
+            result: Value,
+        ) -> loomex_core::CoreResult<loomex_core::RunnerJobResponse> {
+            let job = json!({"id": job_id, "status": "succeeded", "result": result});
+            self.completed_runner_jobs.push(job.clone());
+            Ok(loomex_core::RunnerJobResponse { job: Some(job) })
+        }
+
+        fn fail_runner_job(
+            &mut self,
+            _credential: &ManagementCredential,
+            _session_id: &str,
+            job_id: &str,
+            error: Value,
+        ) -> loomex_core::CoreResult<loomex_core::RunnerJobResponse> {
+            let job = json!({"id": job_id, "status": "failed", "error": error});
+            self.failed_runner_jobs.push(job.clone());
+            Ok(loomex_core::RunnerJobResponse { job: Some(job) })
+        }
+
         fn issue_stream_credential(
             &mut self,
             _credential: &ManagementCredential,
@@ -9107,6 +9662,44 @@ mod tests {
                     grpc_endpoint: "https://loomex.app/runner-stream".to_string(),
                 }))
         }
+    }
+
+    #[test]
+    fn runner_control_file_list_and_read_many_jobs_inspect_workspace() {
+        let workspace = temp_workspace_path("runner-file-jobs");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(workspace.join("old/src")).unwrap();
+        fs::write(workspace.join("old/README.md"), "hello\n").unwrap();
+        fs::write(workspace.join("old/src/AuthService.php"), "<?php\n").unwrap();
+        let mut resolved = service_resolved_settings();
+        resolved.workspace_path = Some(workspace.display().to_string());
+
+        let list = execute_runner_control_job(
+            &resolved,
+            &json!({
+                "kind": "file.list",
+                "payload": {"path": ".", "limit": 20}
+            }),
+        )
+        .unwrap();
+        let listed = list["files"].as_array().unwrap();
+        assert!(listed.iter().any(|item| item["path"] == "old/README.md"));
+        assert!(listed
+            .iter()
+            .any(|item| item["path"] == "old/src/AuthService.php"));
+
+        let read = execute_runner_control_job(
+            &resolved,
+            &json!({
+                "kind": "file.read_many",
+                "payload": {"files": ["old/README.md"], "maxBytesPerFile": 4}
+            }),
+        )
+        .unwrap();
+        assert_eq!(read["files"][0]["path"], "old/README.md");
+        assert_eq!(read["files"][0]["content"], "hell");
+        assert_eq!(read["files"][0]["truncated"], true);
+        let _ = fs::remove_dir_all(workspace);
     }
 
     fn temp_config_path(label: &str) -> PathBuf {
