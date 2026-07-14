@@ -6,6 +6,7 @@ TAURI_DIR="${ROOT_DIR}/crates/loomex-tauri"
 PROFILE="${LOOMEX_TAURI_PROFILE:-release}"
 APP_NAME="Loomex"
 APP_EXECUTABLE="loomex-tauri"
+RUNNER_EXECUTABLE="loomex"
 PACKAGE_DIR="${LOOMEX_TAURI_PACKAGE_DIR:-${ROOT_DIR}/target/loomex-tauri-package/${PROFILE}}"
 INSTALL_DIR="${LOOMEX_TAURI_INSTALL_DIR:-${PACKAGE_DIR}/install/Applications}"
 SIGN_IDENTITY="${LOOMEX_TAURI_SIGN_IDENTITY:--}"
@@ -88,16 +89,23 @@ IDENTIFIER="$(printf '%s\n' "${CONFIG_VALUES}" | sed -n '1p')"
 VERSION="$(printf '%s\n' "${CONFIG_VALUES}" | sed -n '2p')"
 PRODUCT_NAME="$(printf '%s\n' "${CONFIG_VALUES}" | sed -n '3p')"
 
-echo "== build ${PRODUCT_NAME} Tauri binary =="
+echo "== build ${PRODUCT_NAME} Tauri and runner binaries =="
 if [[ -n "${CARGO_RELEASE_FLAG}" ]]; then
   (cd "${ROOT_DIR}" && cargo build -p loomex-tauri --bin "${APP_EXECUTABLE}" "${CARGO_RELEASE_FLAG}")
+  (cd "${ROOT_DIR}" && cargo build -p loomex-cli --bin "${RUNNER_EXECUTABLE}" "${CARGO_RELEASE_FLAG}")
 else
   (cd "${ROOT_DIR}" && cargo build -p loomex-tauri --bin "${APP_EXECUTABLE}")
+  (cd "${ROOT_DIR}" && cargo build -p loomex-cli --bin "${RUNNER_EXECUTABLE}")
 fi
 
 BINARY="${CARGO_BIN_DIR}/${APP_EXECUTABLE}"
 if [[ ! -x "${BINARY}" ]]; then
   echo "expected built binary at ${BINARY}" >&2
+  exit 1
+fi
+RUNNER_BINARY="${CARGO_BIN_DIR}/${RUNNER_EXECUTABLE}"
+if [[ ! -x "${RUNNER_BINARY}" ]]; then
+  echo "expected built runner binary at ${RUNNER_BINARY}" >&2
   exit 1
 fi
 
@@ -112,6 +120,8 @@ rm -rf "${APP_BUNDLE}" "${PACKAGE_DIR}/${APP_NAME}.dmg" "${PACKAGE_DIR}/${APP_NA
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${INSTALL_DIR}"
 cp "${BINARY}" "${MACOS_DIR}/${APP_EXECUTABLE}"
 chmod 755 "${MACOS_DIR}/${APP_EXECUTABLE}"
+cp "${RUNNER_BINARY}" "${MACOS_DIR}/${RUNNER_EXECUTABLE}"
+chmod 755 "${MACOS_DIR}/${RUNNER_EXECUTABLE}"
 cp "${TAURI_DIR}/icons/icon.png" "${RESOURCES_DIR}/icon.png"
 
 cat >"${CONTENTS_DIR}/Info.plist" <<PLIST
@@ -237,6 +247,7 @@ manifest = {
     },
     "browserLogin": "uses_system_browser_url_from_login_device_start",
     "workspacePicker": "uses_tauri_native_dialog_command",
+    "bundledRunner": "Contents/MacOS/loomex",
     "autoUpdate": "signed_manifest_helpers_ready_install_loop_external",
     "notarization": "required_for_public_distribution",
 }
