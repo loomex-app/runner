@@ -23,7 +23,7 @@ from loomex_runner.config import (
 from loomex_runner.jobs import RunnerJobError, run_job, runner_manifest
 
 
-DEFAULT_LOCAL_SERVER = "http://127.0.0.1:28080/api/v1/runner-control"
+DEFAULT_LOCAL_SERVER = "http://127.0.0.1:28000/api/v1/runner-control"
 LEGACY_COMPATIBILITY_WINDOW = (
     "dev-smoke compatibility until Rust/gRPC `loomex` runner passes Phase 50 acceptance, "
     "then one stable `loomex` release"
@@ -579,7 +579,7 @@ def normalize_server_url(value: str) -> str:
 
 
 def default_host_header(server: str) -> str:
-    if "127.0.0.1:28080" in server or "localhost:28080" in server:
+    if "127.0.0.1:28000" in server or "localhost:28000" in server:
         return "loomex.localhost"
     return ""
 

@@ -38,7 +38,7 @@ Current legacy spike path is:
 
 ```bash
 loomex-runner login \
-  --server http://127.0.0.1:28080/api/v1/runner-control \
+  --server http://127.0.0.1:28000/api/v1/runner-control \
   --host-header loomex.localhost \
   --api-key wfpk_... \
   --api-secret wfsk_...
@@ -70,7 +70,7 @@ missing JSON inputs.
 
 ```bash
 loomex-runner login \
-  --server http://127.0.0.1:28080/api/v1/runner-control \
+  --server http://127.0.0.1:28000/api/v1/runner-control \
   --host-header loomex.localhost \
   --token lmxrt_...
 
@@ -190,7 +190,7 @@ The production `loomex` CLI stores non-secret profile settings at `~/.loomex/con
 The file is versioned and can be managed with `loomex config get|set|list`.
 
 ```toml
-configVersion = 1
+configVersion = 2
 selectedProfile = "default"
 
 [profiles."default"]
@@ -200,7 +200,7 @@ serverUrl = "https://loomex.app"
 serverUrl = "https://stage.loomex.app"
 
 [profiles."local"]
-serverUrl = "http://127.0.0.1:28080"
+serverUrl = "http://127.0.0.1:28000"
 hostHeader = "loomex.localhost"
 ```
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 
 from loomex_runner.cli import (
+    DEFAULT_LOCAL_SERVER,
+    default_host_header,
     legacy_warning_message,
     parse_human_input,
     parse_json_argument,
@@ -22,6 +24,11 @@ def test_parse_human_input_keeps_legacy_plain_input_as_prompt():
     args = argparse.Namespace(input="create README", input_json="")
 
     assert parse_human_input(args) == {"prompt": "create README"}
+
+
+def test_legacy_local_default_targets_the_direct_backend_port():
+    assert DEFAULT_LOCAL_SERVER == "http://127.0.0.1:28000/api/v1/runner-control"
+    assert default_host_header(DEFAULT_LOCAL_SERVER) == "loomex.localhost"
 
 
 def test_parse_human_input_accepts_json_object():
@@ -71,7 +78,7 @@ def test_toml_config_round_trip_profiles(tmp_path):
     path = tmp_path / "config.toml"
 
     set_login(
-        server="http://127.0.0.1:28080/api/v1/runner-control",
+        server="http://127.0.0.1:28000/api/v1/runner-control",
         token="lmxrt_test",
         host_header="loomex.localhost",
         profile="local",
@@ -93,7 +100,7 @@ def test_legacy_token_config_round_trip_still_works_until_removal(tmp_path):
     path = tmp_path / ".loomex-runner" / "config.toml"
 
     set_login(
-        server="http://127.0.0.1:28080/api/v1/runner-control",
+        server="http://127.0.0.1:28000/api/v1/runner-control",
         token="lmxrt_legacy_token",
         host_header="loomex.localhost",
         profile="default",
@@ -102,7 +109,7 @@ def test_legacy_token_config_round_trip_still_works_until_removal(tmp_path):
 
     settings = profile_settings(load_config(path), "default")
     assert settings["token"] == "lmxrt_legacy_token"
-    assert settings["server"] == "http://127.0.0.1:28080/api/v1/runner-control"
+    assert settings["server"] == "http://127.0.0.1:28000/api/v1/runner-control"
 
 
 def test_toml_config_snapshot_matches_current_runner_profile_shape():
@@ -110,7 +117,7 @@ def test_toml_config_snapshot_matches_current_runner_profile_shape():
         "defaultProfile": "local",
         "profiles": {
             "local": {
-                "server": "http://127.0.0.1:28080/api/v1/runner-control",
+                "server": "http://127.0.0.1:28000/api/v1/runner-control",
                 "hostHeader": "loomex.localhost",
                 "token": "lmxrt_test",
                 "runnerId": "runner-1",
@@ -125,7 +132,7 @@ def test_toml_config_snapshot_matches_current_runner_profile_shape():
         'defaultProfile = "local"\n'
         "\n"
         '[profiles."local"]\n'
-        'server = "http://127.0.0.1:28080/api/v1/runner-control"\n'
+        'server = "http://127.0.0.1:28000/api/v1/runner-control"\n'
         'hostHeader = "loomex.localhost"\n'
         'token = "lmxrt_test"\n'
         'runnerId = "runner-1"\n'

@@ -6,7 +6,7 @@ RUNNER_BIN="${RUNNER_BIN:-loomex-runner}"
 CONFIG_DIR="${LOOMEX_RUNNER_SMOKE_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/loomex-runner-smoke.XXXXXX")}"
 WORKSPACE_DIR="${LOOMEX_RUNNER_SMOKE_WORKSPACE:-${CONFIG_DIR}/workspace}"
 CONFIG_PATH="${CONFIG_DIR}/config.toml"
-SERVER="${LOOMEX_RUNNER_SMOKE_SERVER:-http://127.0.0.1:28080/api/v1/runner-control}"
+SERVER="${LOOMEX_RUNNER_SMOKE_SERVER:-http://127.0.0.1:28000/api/v1/runner-control}"
 HOST_HEADER="${LOOMEX_RUNNER_SMOKE_HOST_HEADER:-loomex.localhost}"
 TOKEN="${LOOMEX_RUNNER_SMOKE_TOKEN:-}"
 API_KEY="${LOOMEX_RUNNER_SMOKE_API_KEY:-}"
@@ -32,7 +32,7 @@ Optional live e2e:
     LOOMEX_RUNNER_SMOKE_API_SECRET=<wfsk_...>
 
 Optional connection settings:
-  LOOMEX_RUNNER_SMOKE_SERVER=http://127.0.0.1:28080/api/v1/runner-control
+  LOOMEX_RUNNER_SMOKE_SERVER=http://127.0.0.1:28000/api/v1/runner-control
   LOOMEX_RUNNER_SMOKE_HOST_HEADER=loomex.localhost
   LOOMEX_RUNNER_SMOKE_WORKSPACE=/path/to/workspace
   RUNNER_BIN=loomex-runner

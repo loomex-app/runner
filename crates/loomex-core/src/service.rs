@@ -4,17 +4,23 @@ use crate::{CoreError, CoreResult};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum RunnerServicePlatform {
+    MacOsLaunchAgent,
     LinuxUserSystemd,
     LinuxSystemSystemd,
-    WindowsService,
 }
 
 impl RunnerServicePlatform {
     pub fn parse(value: &str) -> CoreResult<Self> {
         match value {
+            "macos" | "macos-launch-agent" | "launch-agent" | "launchd-user" => {
+                Ok(Self::MacOsLaunchAgent)
+            }
             "linux-user" | "systemd-user" => Ok(Self::LinuxUserSystemd),
             "linux-system" | "systemd-system" => Ok(Self::LinuxSystemSystemd),
-            "windows" | "windows-service" => Ok(Self::WindowsService),
+            "windows" | "windows-service" => Err(CoreError::new(
+                "RUNNER_SERVICE_PLATFORM_UNSUPPORTED",
+                "Windows local-control support is unavailable until the named-pipe server is implemented",
+            )),
             _ => Err(CoreError::new(
                 "RUNNER_SERVICE_PLATFORM_UNSUPPORTED",
                 format!("unsupported service platform {value}"),
@@ -22,19 +28,29 @@ impl RunnerServicePlatform {
         }
     }
 
-    pub fn current() -> Self {
-        if cfg!(windows) {
-            Self::WindowsService
-        } else {
-            Self::LinuxUserSystemd
+    pub fn current() -> CoreResult<Self> {
+        #[cfg(windows)]
+        {
+            return Err(CoreError::new(
+                "RUNNER_SERVICE_PLATFORM_UNSUPPORTED",
+                "Windows local-control support is unavailable until the named-pipe server is implemented",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Ok(Self::MacOsLaunchAgent)
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        {
+            Ok(Self::LinuxUserSystemd)
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::MacOsLaunchAgent => "macos",
             Self::LinuxUserSystemd => "linux-user",
             Self::LinuxSystemSystemd => "linux-system",
-            Self::WindowsService => "windows",
         }
     }
 }
@@ -76,15 +92,15 @@ impl RunnerServiceSpec {
     pub fn render(&self, platform: RunnerServicePlatform) -> CoreResult<RunnerServiceManifest> {
         self.validate()?;
         match platform {
+            RunnerServicePlatform::MacOsLaunchAgent => Ok(RunnerServiceManifest::launch_agent(
+                &self.service_name,
+                render_launch_agent(self)?,
+            )),
             RunnerServicePlatform::LinuxUserSystemd => Ok(RunnerServiceManifest::systemd_user(
                 render_systemd_unit(self, "default.target"),
             )),
             RunnerServicePlatform::LinuxSystemSystemd => Ok(RunnerServiceManifest::systemd_system(
                 render_systemd_unit(self, "multi-user.target"),
-            )),
-            RunnerServicePlatform::WindowsService => Ok(RunnerServiceManifest::windows(
-                render_windows_install_script(self),
-                render_windows_uninstall_script(&self.service_name),
             )),
         }
     }
@@ -100,6 +116,16 @@ pub struct RunnerServiceManifest {
 }
 
 impl RunnerServiceManifest {
+    fn launch_agent(service_name: &str, content: String) -> Self {
+        Self {
+            platform: RunnerServicePlatform::MacOsLaunchAgent,
+            install_path: format!("~/Library/LaunchAgents/{service_name}.plist"),
+            uninstall_path: None,
+            content,
+            uninstall_content: None,
+        }
+    }
+
     fn systemd_user(content: String) -> Self {
         Self {
             platform: RunnerServicePlatform::LinuxUserSystemd,
@@ -117,16 +143,6 @@ impl RunnerServiceManifest {
             uninstall_path: None,
             content,
             uninstall_content: None,
-        }
-    }
-
-    fn windows(install_content: String, uninstall_content: String) -> Self {
-        Self {
-            platform: RunnerServicePlatform::WindowsService,
-            install_path: "loomex-runner-service-install.ps1".to_string(),
-            uninstall_path: Some("loomex-runner-service-uninstall.ps1".to_string()),
-            content: install_content,
-            uninstall_content: Some(uninstall_content),
         }
     }
 }
@@ -209,49 +225,69 @@ StandardError=journal\n",
     unit
 }
 
-fn render_windows_install_script(spec: &RunnerServiceSpec) -> String {
-    let mut command_line = format!(
-        "{} runner service run --config {}",
-        windows_command_line_quote(&spec.binary_path.to_string_lossy()),
-        windows_command_line_quote(&spec.config_path.to_string_lossy())
-    );
+fn render_launch_agent(spec: &RunnerServiceSpec) -> CoreResult<String> {
+    let mut arguments = vec![
+        xml_escape_path(&spec.binary_path)?,
+        "runner".to_string(),
+        "service".to_string(),
+        "run".to_string(),
+        "--config".to_string(),
+        xml_escape_path(&spec.config_path)?,
+    ];
     if let Some(profile) = &spec.profile {
-        command_line.push_str(&format!(
-            " --profile {}",
-            windows_command_line_quote(profile)
-        ));
+        arguments.push("--profile".to_string());
+        arguments.push(xml_escape(profile)?);
     }
-    if let Some(log_path) = &spec.log_path {
-        command_line.push_str(&format!(
-            " --log-path {}",
-            windows_command_line_quote(&log_path.to_string_lossy())
-        ));
-    }
-    format!(
-        "$ErrorActionPreference = 'Stop'\r\n\
-$Name = {name}\r\n\
-$BinaryPathName = {binary_path_name}\r\n\
-if (Get-Service -Name $Name -ErrorAction SilentlyContinue) {{\r\n\
-  throw \"RUNNER_SERVICE_ALREADY_INSTALLED: $Name already exists\"\r\n\
-}}\r\n\
-New-Service -Name $Name -BinaryPathName $BinaryPathName -DisplayName 'Loomex Runner' -StartupType Automatic\r\n\
-Start-Service -Name $Name\r\n",
-        name = powershell_quote_text(&spec.service_name),
-        binary_path_name = powershell_quote_text(&command_line),
-    )
-}
 
-fn render_windows_uninstall_script(service_name: &str) -> String {
-    format!(
-        "$ErrorActionPreference = 'Stop'\r\n\
-$Name = {name}\r\n\
-$Service = Get-Service -Name $Name -ErrorAction SilentlyContinue\r\n\
-if ($Service) {{\r\n\
-  if ($Service.Status -ne 'Stopped') {{ Stop-Service -Name $Name -Force }}\r\n\
-  sc.exe delete $Name | Out-Null\r\n\
-}}\r\n",
-        name = powershell_quote_text(service_name),
-    )
+    let working_directory = spec
+        .working_directory
+        .as_deref()
+        .or_else(|| spec.config_path.parent())
+        .unwrap_or_else(|| Path::new("/"));
+    let argument_elements = arguments
+        .into_iter()
+        .map(|argument| format!("    <string>{argument}</string>\n"))
+        .collect::<String>();
+
+    let mut plist = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+<plist version=\"1.0\">\n\
+<dict>\n\
+  <key>Label</key>\n\
+  <string>{label}</string>\n\
+  <key>ProgramArguments</key>\n\
+  <array>\n\
+{argument_elements}\
+  </array>\n\
+  <key>WorkingDirectory</key>\n\
+  <string>{working_directory}</string>\n\
+  <key>RunAtLoad</key>\n\
+  <true/>\n\
+  <key>KeepAlive</key>\n\
+  <true/>\n\
+  <key>ThrottleInterval</key>\n\
+  <integer>5</integer>\n",
+        label = xml_escape(&spec.service_name)?,
+        working_directory = xml_escape_path(working_directory)?,
+    );
+
+    if let Some(log_path) = &spec.log_path {
+        let escaped_log_path = xml_escape_path(log_path)?;
+        plist.push_str(&format!(
+            "  <key>EnvironmentVariables</key>\n\
+  <dict>\n\
+    <key>LOOMEX_RUNNER_LOG_PATH</key>\n\
+    <string>{escaped_log_path}</string>\n\
+  </dict>\n\
+  <key>StandardOutPath</key>\n\
+  <string>{escaped_log_path}</string>\n\
+  <key>StandardErrorPath</key>\n\
+  <string>{escaped_log_path}</string>\n"
+        ));
+    }
+    plist.push_str("</dict>\n</plist>\n");
+    Ok(plist)
 }
 
 fn validate_service_name(value: &str) -> CoreResult<()> {
@@ -302,38 +338,130 @@ fn systemd_quote_text(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn powershell_quote_text(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+fn xml_escape_path(path: &Path) -> CoreResult<String> {
+    let value = path.to_str().ok_or_else(|| {
+        CoreError::new(
+            "RUNNER_SERVICE_PATH_ENCODING_INVALID",
+            "service paths must be valid UTF-8",
+        )
+    })?;
+    xml_escape(value)
 }
 
-fn windows_command_line_quote(value: &str) -> String {
-    let mut quoted = String::from("\"");
-    let mut backslashes = 0usize;
+fn xml_escape(value: &str) -> CoreResult<String> {
+    if value.chars().any(|ch| {
+        !matches!(ch, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+    }) {
+        return Err(CoreError::new(
+            "RUNNER_SERVICE_PLIST_VALUE_INVALID",
+            "service plist values must contain only valid XML characters",
+        ));
+    }
+
+    let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
-            '\\' => {
-                backslashes += 1;
-                quoted.push('\\');
-            }
-            '"' => {
-                quoted.push_str(&"\\".repeat(backslashes));
-                quoted.push_str("\\\"");
-                backslashes = 0;
-            }
-            _ => {
-                backslashes = 0;
-                quoted.push(ch);
-            }
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
         }
     }
-    quoted.push_str(&"\\".repeat(backslashes));
-    quoted.push('"');
-    quoted
+    Ok(escaped)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_launch_agent_renders_persistent_service_and_escapes_xml() {
+        let spec = RunnerServiceSpec {
+            service_name: "com.loomex.runner".to_string(),
+            binary_path: PathBuf::from("/Applications/Loomex & Tools/loomex"),
+            config_path: PathBuf::from("/Users/dev/.loomex/config <work>.toml"),
+            profile: Some("R&D <primary> \"team\"".to_string()),
+            log_path: Some(PathBuf::from("/Users/dev/Library/Logs/Loomex & Runner.log")),
+            working_directory: Some(PathBuf::from("/Users/dev/Code/A&B")),
+        };
+
+        let manifest = spec
+            .render(RunnerServicePlatform::MacOsLaunchAgent)
+            .unwrap();
+
+        assert_eq!(RunnerServicePlatform::MacOsLaunchAgent, manifest.platform);
+        assert_eq!(
+            "~/Library/LaunchAgents/com.loomex.runner.plist",
+            manifest.install_path
+        );
+        assert_eq!(None, manifest.uninstall_path);
+        assert!(manifest.content.contains("<key>RunAtLoad</key>\n<true/>"));
+        assert!(manifest.content.contains("<key>KeepAlive</key>\n<true/>"));
+        assert!(manifest
+            .content
+            .contains("<key>ThrottleInterval</key>\n<integer>5</integer>"));
+        assert!(manifest
+            .content
+            .contains("/Applications/Loomex &amp; Tools/loomex"));
+        assert!(manifest
+            .content
+            .contains("/Users/dev/.loomex/config &lt;work&gt;.toml"));
+        assert!(manifest
+            .content
+            .contains("R&amp;D &lt;primary&gt; &quot;team&quot;"));
+        assert!(manifest
+            .content
+            .contains("<key>LOOMEX_RUNNER_LOG_PATH</key>"));
+        assert!(manifest.content.contains("<key>StandardOutPath</key>"));
+        assert!(manifest.content.contains("<key>StandardErrorPath</key>"));
+        assert!(manifest
+            .content
+            .contains("/Users/dev/Library/Logs/Loomex &amp; Runner.log"));
+        assert!(manifest.content.ends_with("</dict>\n</plist>\n"));
+    }
+
+    #[test]
+    fn macos_platform_aliases_and_current_detection_are_stable() {
+        for alias in [
+            "macos",
+            "macos-launch-agent",
+            "launch-agent",
+            "launchd-user",
+        ] {
+            assert_eq!(
+                RunnerServicePlatform::MacOsLaunchAgent,
+                RunnerServicePlatform::parse(alias).unwrap()
+            );
+        }
+        assert_eq!("macos", RunnerServicePlatform::MacOsLaunchAgent.as_str());
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                RunnerServicePlatform::MacOsLaunchAgent,
+                RunnerServicePlatform::current().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn macos_launch_agent_rejects_xml_control_characters() {
+        let spec = RunnerServiceSpec {
+            service_name: "com.loomex.runner".to_string(),
+            binary_path: PathBuf::from("/opt/loomex/loomex"),
+            config_path: PathBuf::from("/Users/dev/.loomex/config.toml"),
+            profile: Some("invalid\0profile".to_string()),
+            log_path: None,
+            working_directory: None,
+        };
+
+        assert_eq!(
+            "RUNNER_SERVICE_PLIST_VALUE_INVALID",
+            spec.render(RunnerServicePlatform::MacOsLaunchAgent)
+                .unwrap_err()
+                .code
+        );
+    }
 
     #[test]
     fn linux_user_unit_quotes_paths_with_spaces_and_uses_journal() {
@@ -360,31 +488,11 @@ mod tests {
     }
 
     #[test]
-    fn windows_manifest_uses_crlf_and_service_commands() {
-        let spec = RunnerServiceSpec {
-            service_name: "loomex-runner".to_string(),
-            binary_path: PathBuf::from("C:\\Program Files\\Loomex\\loomex.exe"),
-            config_path: PathBuf::from("C:\\Users\\Dev User\\.loomex\\config.toml"),
-            profile: Some("work".to_string()),
-            log_path: Some(PathBuf::from("C:\\Users\\Dev User\\.loomex\\runner.log")),
-            working_directory: None,
-        };
-
-        let manifest = spec.render(RunnerServicePlatform::WindowsService).unwrap();
-
-        assert_eq!(RunnerServicePlatform::WindowsService, manifest.platform);
-        assert!(manifest.content.contains("New-Service"));
-        assert!(manifest.content.contains("\"C:\\Program Files\\Loomex\\loomex.exe\" runner service run --config \"C:\\Users\\Dev User\\.loomex\\config.toml\""));
-        assert!(manifest
-            .content
-            .contains("--log-path \"C:\\Users\\Dev User\\.loomex\\runner.log\""));
-        assert!(manifest.content.contains("--profile"));
-        assert!(manifest.content.contains("work"));
-        assert!(manifest.content.contains("\r\n"));
-        assert!(manifest
-            .uninstall_content
-            .unwrap()
-            .contains("sc.exe delete"));
+    fn windows_service_is_not_advertised_without_named_pipe_server() {
+        assert_eq!(
+            "RUNNER_SERVICE_PLATFORM_UNSUPPORTED",
+            RunnerServicePlatform::parse("windows").unwrap_err().code
+        );
     }
 
     #[test]

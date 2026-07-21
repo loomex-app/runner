@@ -1,31 +1,52 @@
+mod setup_transaction;
+
 use std::{
     collections::{hash_map::DefaultHasher, HashSet},
     env, fs,
+    fs::OpenOptions,
     hash::{Hash, Hasher},
-    io::{self, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{self, Command},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use loomex_core::release_security::sha256_hex;
+#[cfg(unix)]
+use loomex_core::UnixLocalControlServer;
 use loomex_core::{
     acquire_runner_runtime_guard,
     config::default_config_path,
-    grpc::{validate_proxy_transport, GrpcClientConfig, StreamCredential},
+    enforce_policy_decision,
+    execution::{
+        JobRecoveryAction, JobReplaySafety, RecoverableJobPhase, RecoverableRunnerJob,
+        RemoteRunnerJobSnapshot, RemoteRunnerJobStatus, RunnerJobRecoveryJournal,
+    },
+    grpc::{GrpcClientConfig, StreamCredential},
     protocol::{StreamIdentity, PROTOCOL_VERSION},
-    read_recent_log_entries, release_runner_runtime_guard_for_surface, runner_runtime_guard_path,
-    AuthTokenResponse, CliConfig, CliConfigOverrides, CredentialStorageBackend, CredentialStore,
-    DeviceLoginChallenge, HttpManagementApiClient, HumanRequestSummary, LogEntry,
-    ManagementApiClient, ManagementCredential, ManagementProjectRunnerBinding, Organization,
-    Project, ProjectRunnerBindingCreateRequest, Runner, RunnerServiceManifest,
-    RunnerServicePlatform, RunnerServiceSpec, RunnerTransportRuntime, RunnerUpsertRequest,
-    SbomPackage, StreamCredentialRequest, StreamCredentialResponse, StreamSupervisor,
-    StreamSupervisorConfig, SystemCredentialStore, TransportClientConfig, TransportConnector,
-    TransportNegotiationPolicy, WebSocketClientConfig, WebSocketProxyConfig,
-    WorkflowRunStartRequest,
+    read_local_control_token, read_recent_log_entries, release_runner_runtime_guard_for_surface,
+    runner_runtime_guard_path, user_credential_profile, AuthTokenResponse, BindingStatus,
+    BindingValidationContext, BundledRuntimeInstall, CapabilityExecutor, CapabilityRequest,
+    CliConfig, CliConfigOverrides, CredentialKind, CredentialStorageBackend, CredentialStore,
+    DeviceLoginChallenge, FileLogSink, FsListInput, FsReadInput, FsWriteInput,
+    HttpManagementApiClient, HumanRequestSummary, LocalCapabilityExecutor, LocalControlDispatcher,
+    LocalControlPaths, LocalControlRequest, LocalControlResponse, LogEntry, ManagementApiClient,
+    ManagementCredential, ManagementProjectRunnerBinding, Organization, PolicyDecision,
+    PolicyEngine, PolicyEvaluationInput, PolicyLayer, PolicyRule, PolicySource, Project,
+    ProjectRunnerBinding, ProjectRunnerBindingCreateRequest, Runner, RunnerCapabilityGrant,
+    RunnerServiceManifest, RunnerServicePlatform, RunnerServiceSpec, RunnerSession,
+    RunnerSessionStatus, RunnerTransportRuntime, RunnerUpsertRequest, RuntimeInstaller,
+    SbomPackage, ShellCancellationToken, ShellExecInput, StreamCredentialRequest,
+    StreamCredentialResponse, StreamSupervisor, StreamSupervisorConfig, SystemCredentialStore,
+    TransportClientConfig, TransportConnector, TransportNegotiationPolicy, WebSocketClientConfig,
+    WebSocketProxyConfig, WorkflowRunStartRequest, WorkspacePath, LOCAL_CONTROL_PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
+use setup_transaction::{
+    FileSnapshot, SetupTransactionJournal, SetupTransactionOperation, SetupTransactionPhase,
+    SetupTransactionSnapshot, SetupTransactionStore,
+};
 
 const DEFAULT_LOG_LIMIT: usize = 100;
 const LOG_PATH_ENV: &str = "LOOMEX_RUNNER_LOG_PATH";
@@ -187,7 +208,7 @@ fn doctor_exit_code_from_output(output: &str) -> Option<i32> {
 fn doctor_failed_check_exit_code(name: &str) -> i32 {
     match name {
         "auth" => 10,
-        "server" | "grpc" => 20,
+        "server" | "runnerControl" => 20,
         "workspace" | "git" | "shell" | "sh" | "cmd" => 30,
         _ => 1,
     }
@@ -200,6 +221,17 @@ fn run(args: Vec<String>) -> Result<String, String> {
     }
     if parsed.args == ["--help"] || parsed.args == ["-h"] {
         return Ok(ROOT_HELP.to_string());
+    }
+
+    // Direct CLI lifecycle commands share the same transaction fence as MCP
+    // plugin-control mutations. The lock is held across the mutation so setup
+    // compensation cannot race a config, identity, binding, or service change.
+    let direct_lifecycle_mutation = direct_cli_is_lifecycle_mutation(&parsed.args);
+    let _direct_lifecycle_lock = direct_lifecycle_mutation
+        .then(PluginSetupTransactionLock::acquire)
+        .transpose()?;
+    if direct_lifecycle_mutation {
+        plugin_reject_unfinished_setup_transaction()?;
     }
 
     match parsed.args.as_slice() {
@@ -220,6 +252,31 @@ fn run(args: Vec<String>) -> Result<String, String> {
         [command, rest @ ..] if command == "trace" => run_trace(rest, &parsed.options),
         [command, ..] => Err(format!("unknown loomex command: {command}\n{ROOT_HELP}")),
         [] => Ok(wizard_start_output(parsed.options.json)),
+    }
+}
+
+fn direct_cli_is_lifecycle_mutation(args: &[String]) -> bool {
+    match args {
+        [command, rest @ ..] if command == "login" || command == "logout" => {
+            !rest.first().is_some_and(|value| is_help(value))
+        }
+        [command, subcommand, ..] if command == "config" => subcommand == "set",
+        [command, subcommand, ..] if command == "profile" => {
+            matches!(subcommand.as_str(), "use" | "switch")
+        }
+        [command, subcommand, ..] if command == "org" || command == "project" => {
+            subcommand == "select"
+        }
+        [command, rest @ ..] if command == "bind" => !rest
+            .first()
+            .is_some_and(|value| value == "list" || is_help(value)),
+        [command, subcommand] if command == "runner" => {
+            matches!(subcommand.as_str(), "start" | "stop")
+        }
+        [command, service, subcommand, ..] if command == "runner" && service == "service" => {
+            matches!(subcommand.as_str(), "install" | "uninstall")
+        }
+        _ => false,
     }
 }
 
@@ -461,6 +518,7 @@ fn run_login(args: &[String], options: &GlobalOptions) -> Result<String, String>
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_login_with<C: ManagementApiClient, S: CredentialStore>(
     request: LoginRequest,
     options: &GlobalOptions,
@@ -478,55 +536,75 @@ fn run_login_with<C: ManagementApiClient, S: CredentialStore>(
             .get(profile)
             .and_then(|p| p.organization_id.clone())
     });
-    let (token, organization_id, device_challenge) = if let (Some(api_key), Some(api_secret)) =
-        (request.api_key.clone(), request.api_secret.clone())
-    {
-        let fallback_organization_id = organization_id.clone().unwrap_or_default();
-        let exchange = client
-            .exchange_api_key(&api_key, &api_secret, &fallback_organization_id)
-            .map_err(format_core_error)?;
-        let organization_id = exchange
-            .organization_id
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(fallback_organization_id);
-        (exchange.token, organization_id, None)
-    } else if request.api_key.is_some() || request.api_secret.is_some() {
-        return Err(
-            "LOGIN_INPUT_INVALID: --api-key and --api-secret are required together".to_string(),
-        );
-    } else {
-        if options.non_interactive {
-            return Err(
-                "NON_INTERACTIVE_INPUT_REQUIRED: login requires --api-key and --api-secret"
-                    .to_string(),
-            );
-        }
-        let challenge = client.start_device_login().map_err(format_core_error)?;
-        present_challenge(&challenge);
-        let token = poll_device_login(
-            client,
-            &challenge.device_code,
-            challenge.interval_seconds,
-            request.device_timeout_seconds,
-        )?;
-        let organization_id = if let Some(organization_id) =
-            organization_id.or_else(|| request.organization_id.clone())
+    let (token, organization_id, device_challenge, user_token) =
+        if let (Some(api_key), Some(api_secret)) =
+            (request.api_key.clone(), request.api_secret.clone())
         {
-            organization_id
+            let fallback_organization_id = organization_id.clone().unwrap_or_default();
+            let exchange = client
+                .exchange_api_key(&api_key, &api_secret, &fallback_organization_id)
+                .map_err(format_core_error)?;
+            let organization_id = exchange
+                .organization_id
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(fallback_organization_id);
+            (exchange.token, organization_id, None, false)
+        } else if request.api_key.is_some() || request.api_secret.is_some() {
+            return Err(
+                "LOGIN_INPUT_INVALID: --api-key and --api-secret are required together".to_string(),
+            );
         } else {
-            select_device_login_organization(client, profile, &token)?
+            if options.non_interactive {
+                return Err(
+                    "NON_INTERACTIVE_INPUT_REQUIRED: login requires --api-key and --api-secret"
+                        .to_string(),
+                );
+            }
+            let challenge = client.start_device_login().map_err(format_core_error)?;
+            present_challenge(&challenge);
+            let token = poll_device_login(
+                client,
+                &challenge.device_code,
+                challenge.interval_seconds,
+                request.device_timeout_seconds,
+            )?;
+            let organization_id = if let Some(organization_id) =
+                organization_id.or_else(|| request.organization_id.clone())
+            {
+                organization_id
+            } else {
+                select_device_login_organization(client, profile, &token)?
+            };
+            (token, organization_id, Some(challenge), true)
         };
-        (token, organization_id, Some(challenge))
-    };
 
-    let credential = ManagementCredential::from_token_response(
-        profile,
-        organization_id.clone(),
-        token,
-        storage_backend,
-    )
+    let credential_profile = if user_token {
+        user_credential_profile(profile)
+    } else {
+        profile.to_string()
+    };
+    let credential = if user_token {
+        ManagementCredential::from_user_token_response(
+            &credential_profile,
+            organization_id.clone(),
+            token,
+            storage_backend,
+        )
+    } else {
+        ManagementCredential::from_runner_token_response(
+            &credential_profile,
+            organization_id.clone(),
+            token,
+            storage_backend,
+        )
+    }
     .map_err(format_core_error)?;
     let storage_outcome = store.save(&credential).map_err(format_core_error)?;
+    if user_token {
+        // Device authorization returns a signed user token. Keep it separate from
+        // the runner credential that runner-control issues after project selection.
+        store.delete(profile).map_err(format_core_error)?;
+    }
     config
         .set_key(
             &format!("profiles.{profile}.organizationId"),
@@ -545,6 +623,9 @@ fn run_login_with<C: ManagementApiClient, S: CredentialStore>(
             "expiresAt": credential.expires_at,
             "storageBackend": storage_backend_name(storage_outcome.backend),
             "storageWarning": storage_outcome.warning,
+            "userAuthenticated": user_token,
+            "runnerAuthenticated": !user_token,
+            "projectSelectionRequired": user_token,
             "deviceLogin": device_challenge.as_ref().map(|challenge| json!({
                 "verificationUri": challenge.verification_uri,
                 "userCode": challenge.user_code
@@ -586,14 +667,14 @@ fn poll_device_login<C: ManagementApiClient>(
     let interval = interval_seconds.max(1);
     let attempts = (timeout_seconds / interval).max(1);
     for attempt in 0..attempts {
-        if let Some(token) = client
-            .poll_device_token(device_code)
-            .map_err(format_core_error)?
-        {
-            return Ok(token);
+        match client.poll_device_token(device_code) {
+            Ok(Some(token)) => return Ok(token),
+            Ok(None) => {}
+            Err(error) if error.code == "DEVICE_AUTHORIZATION_SLOW_DOWN" => {}
+            Err(error) => return Err(format_core_error(error)),
         }
         if attempt + 1 < attempts {
-            thread::sleep(Duration::from_secs(interval.min(2)));
+            thread::sleep(Duration::from_secs(interval));
         }
     }
     Err("LOGIN_DEVICE_TIMEOUT: browser/device login timed out".to_string())
@@ -604,7 +685,7 @@ fn select_device_login_organization<C: ManagementApiClient>(
     profile: &str,
     token: &AuthTokenResponse,
 ) -> Result<String, String> {
-    let temporary_credential = ManagementCredential::from_token_response(
+    let temporary_credential = ManagementCredential::from_user_token_response(
         profile,
         "",
         token.clone(),
@@ -637,6 +718,9 @@ fn run_logout(args: &[String], options: &GlobalOptions) -> Result<String, String
         .map_err(format_core_error)?;
     let store = SystemCredentialStore::new(credential_dir());
     store.delete(&resolved.profile).map_err(format_core_error)?;
+    store
+        .delete(&user_credential_profile(&resolved.profile))
+        .map_err(format_core_error)?;
     if options.json {
         return Ok(json!({
             "schemaVersion": "loomex.cli.logout/v1",
@@ -659,7 +743,7 @@ fn run_org(args: &[String], options: &GlobalOptions) -> Result<String, String> {
         .resolve(options.config_overrides(), |key| env::var(key).ok())
         .map_err(format_core_error)?;
     let store = SystemCredentialStore::new(credential_dir());
-    let credential = load_credential(&store, &resolved.profile)?;
+    let credential = load_user_credential(&store, &resolved.profile)?;
     let mut client =
         HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())
             .map_err(format_core_error)?;
@@ -736,7 +820,7 @@ fn run_project(args: &[String], options: &GlobalOptions) -> Result<String, Strin
         .resolve(options.config_overrides(), |key| env::var(key).ok())
         .map_err(format_core_error)?;
     let store = SystemCredentialStore::new(credential_dir());
-    let credential = load_credential(&store, &resolved.profile)?;
+    let credential = load_user_credential(&store, &resolved.profile)?;
     let organization_id = resolved
         .organization_id
         .clone()
@@ -745,7 +829,11 @@ fn run_project(args: &[String], options: &GlobalOptions) -> Result<String, Strin
     let mut client =
         HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())
             .map_err(format_core_error)?;
-    run_project_with(
+    let selected_project_id = match args {
+        [subcommand, project_id] if subcommand == "select" => Some(project_id.clone()),
+        _ => None,
+    };
+    let output = run_project_with(
         args,
         options,
         &mut config,
@@ -754,9 +842,72 @@ fn run_project(args: &[String], options: &GlobalOptions) -> Result<String, Strin
         &mut client,
         &resolved.profile,
         &organization_id,
-    )
+    )?;
+    if let Some(project_id) = selected_project_id {
+        bootstrap_cli_runner_for_project(
+            &mut config,
+            &config_path,
+            &store,
+            &credential,
+            &mut client,
+            &resolved.profile,
+            &organization_id,
+            &project_id,
+            store.storage_backend(),
+        )?;
+    }
+    Ok(output)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn bootstrap_cli_runner_for_project<C: ManagementApiClient, S: CredentialStore + ?Sized>(
+    config: &mut CliConfig,
+    config_path: &Path,
+    store: &S,
+    user_credential: &ManagementCredential,
+    client: &mut C,
+    profile: &str,
+    organization_id: &str,
+    project_id: &str,
+    storage_backend: CredentialStorageBackend,
+) -> Result<(), String> {
+    let exchange = client
+        .bootstrap_runner_with_workspace_token(
+            &user_credential.access_token,
+            organization_id,
+            Some(project_id),
+            None,
+        )
+        .map_err(format_core_error)?;
+    let runner_id = exchange
+        .runner_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "RUNNER_BOOTSTRAP_RESPONSE_INVALID: runnerId is required".to_string())?;
+    let runner_credential = ManagementCredential::from_runner_token_response(
+        profile,
+        organization_id,
+        exchange.token,
+        storage_backend,
+    )
+    .map_err(format_core_error)?;
+    store.save(&runner_credential).map_err(format_core_error)?;
+    config
+        .set_key(&format!("profiles.{profile}.runnerId"), runner_id.clone())
+        .map_err(format_core_error)?;
+    config
+        .set_key(
+            &format!("profiles.{profile}.bindingId"),
+            exchange.binding_id.unwrap_or(runner_id),
+        )
+        .map_err(format_core_error)?;
+    config
+        .set_key(&format!("profiles.{profile}.workspacePath"), String::new())
+        .map_err(format_core_error)?;
+    config.save(config_path).map_err(format_core_error)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_project_with<C: ManagementApiClient>(
     args: &[String],
     options: &GlobalOptions,
@@ -870,6 +1021,27 @@ fn load_credential<S: CredentialStore + ?Sized>(
     Ok(credential)
 }
 
+fn load_user_credential<S: CredentialStore + ?Sized>(
+    store: &S,
+    profile: &str,
+) -> Result<ManagementCredential, String> {
+    let user_profile = user_credential_profile(profile);
+    let credential = store
+        .load(&user_profile)
+        .map_err(format_core_error)?
+        .ok_or_else(|| {
+            "USER_AUTH_REQUIRED: authenticate with the Codex plugin before selecting an organization or project"
+                .to_string()
+        })?;
+    credential
+        .validate_not_expiring(
+            current_epoch_seconds()?,
+            MANAGEMENT_TOKEN_CLOCK_SKEW_SECONDS,
+        )
+        .map_err(format_core_error)?;
+    Ok(credential)
+}
+
 fn current_epoch_seconds() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -882,6 +1054,35 @@ fn storage_backend_name(backend: CredentialStorageBackend) -> &'static str {
         CredentialStorageBackend::MacOsKeychain => "macos_keychain",
         CredentialStorageBackend::LocalFileFallback => "local_file_fallback",
     }
+}
+
+const RUNNER_REAUTH_GUIDANCE: &str = "stored runner credential predates runner-control v1 or lacks runner scopes; sign out and authenticate again, then reselect the project and workspace";
+
+fn runner_credential_upgrade_reason(credential: &ManagementCredential) -> Option<&'static str> {
+    (credential.kind != CredentialKind::RunnerControlV1).then_some(RUNNER_REAUTH_GUIDANCE)
+}
+
+fn validate_runner_credential_compatibility(
+    credential: &ManagementCredential,
+) -> Result<(), String> {
+    match runner_credential_upgrade_reason(credential) {
+        Some(reason) => Err(format!("RUNNER_CREDENTIAL_UPGRADE_REQUIRED: {reason}")),
+        None => Ok(()),
+    }
+}
+
+fn runner_credential_local_readiness(
+    credential: Option<&ManagementCredential>,
+    now_epoch_seconds: u64,
+) -> (bool, Option<&'static str>) {
+    let reauth_reason = credential.and_then(runner_credential_upgrade_reason);
+    let ready = credential.is_some_and(|credential| {
+        credential
+            .validate_not_expiring(now_epoch_seconds, MANAGEMENT_TOKEN_CLOCK_SKEW_SECONDS)
+            .is_ok()
+            && reauth_reason.is_none()
+    });
+    (ready, reauth_reason)
 }
 
 trait Prompt {
@@ -1337,6 +1538,7 @@ fn resolve_workflow_binding_id<C: ManagementApiClient>(
     Ok(Some(matching.id.clone()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_waiting_human_input<C: ManagementApiClient>(
     client: &mut C,
     credential: &ManagementCredential,
@@ -1560,6 +1762,9 @@ fn run_runner(args: &[String], options: &GlobalOptions) -> Result<String, String
         [subcommand] if subcommand == "start" => run_runner_start(options),
         [subcommand] if subcommand == "stop" => run_runner_stop(options),
         [subcommand, rest @ ..] if subcommand == "service" => run_runner_service(rest, options),
+        [subcommand, rest @ ..] if subcommand == "plugin-control" => {
+            run_runner_plugin_control(rest, options)
+        }
         [subcommand, rest @ ..] if subcommand == "release" => run_runner_release(rest, options),
         [subcommand, rest @ ..] if subcommand == "ops" => run_runner_ops(rest, options),
         [subcommand, ..] => Err(format!(
@@ -1567,6 +1772,2719 @@ fn run_runner(args: &[String], options: &GlobalOptions) -> Result<String, String
         )),
         [] => Ok(RUNNER_HELP.to_string()),
     }
+}
+
+const PLUGIN_CONTROL_SCHEMA_VERSION: &str = "loomex.cli.pluginControl/v1";
+const PLUGIN_ROOT_ENV: &str = "LOOMEX_PLUGIN_ROOT";
+const ALLOW_UNSIGNED_PLUGIN_ENV: &str = "LOOMEX_ALLOW_UNSIGNED_VALIDATION_PACKAGE";
+
+fn run_runner_plugin_control(args: &[String], options: &GlobalOptions) -> Result<String, String> {
+    if !options.json || !options.non_interactive {
+        return Err(
+            "PLUGIN_CONTROL_MODE_REQUIRED: plugin-control requires --json and --non-interactive"
+                .to_string(),
+        );
+    }
+    let method = args
+        .first()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "PLUGIN_CONTROL_METHOD_REQUIRED: method is required".to_string())?;
+    let params_text =
+        option_value_optional(&args[1..], "--params-json").unwrap_or_else(|| "{}".to_string());
+    let params: Value = serde_json::from_str(&params_text)
+        .map_err(|err| format!("PLUGIN_CONTROL_PARAMS_INVALID: {err}"))?;
+    if !params.is_object() {
+        return Err("PLUGIN_CONTROL_PARAMS_INVALID: params must be a JSON object".to_string());
+    }
+    // Serialize every bootstrap mutation that can change setup readiness,
+    // service state, identity, project, or workspace binding. Setup apply then
+    // revalidates and consumes one stable reviewed snapshot under this lock.
+    let lifecycle_mutation = plugin_control_is_lifecycle_mutation(method);
+    let _lifecycle_lock = lifecycle_mutation
+        .then(PluginSetupTransactionLock::acquire)
+        .transpose()?;
+    if lifecycle_mutation && !matches!(method.as_str(), "setup.apply" | "setup.rollback") {
+        plugin_reject_unfinished_setup_transaction()?;
+    }
+    let result = match method.as_str() {
+        "setup.status" => plugin_setup_status(options)?,
+        "setup.plan" => plugin_setup_plan(&params, options)?,
+        "setup.apply" => plugin_setup_apply(&params, options)?,
+        "setup.rollback" => plugin_setup_rollback(&params, options)?,
+        "auth.status" => plugin_auth_status(options)?,
+        "auth.start" => plugin_auth_start(&params, options)?,
+        "auth.wait" => plugin_auth_wait(&params, options)?,
+        "auth.logout" => {
+            plugin_confirmed(&params)?;
+            let mut lifecycle = plugin_stop_service_and_invalidate_local_control(options)?;
+            let remote_revocation =
+                plugin_remote_revocation_outcome(plugin_revoke_remote_runner_token(options));
+            if let Some(object) = lifecycle.as_object_mut() {
+                object.insert(
+                    "remoteTokenRevocation".to_string(),
+                    remote_revocation.clone(),
+                );
+                object.insert("localLoggedOut".to_string(), json!(true));
+            }
+            plugin_finalize_logout_result(
+                parse_json_output(run_logout(&[], options)?)?,
+                lifecycle,
+                remote_revocation,
+            )
+        }
+        "org.list" => plugin_org_list(options)?,
+        "org.select" => {
+            let changing = plugin_validate_org_selection(&params, options)?;
+            if changing {
+                let lifecycle = plugin_stop_service_and_invalidate_local_control(options)?;
+                match plugin_org_select(&params, options) {
+                    Ok(result) => plugin_result_with_lifecycle(result, lifecycle),
+                    Err(error) => return Err(plugin_transition_failure(error, options)),
+                }
+            } else {
+                plugin_org_select(&params, options)?
+            }
+        }
+        "project.list" => plugin_project_list(&params, options)?,
+        "project.select" => {
+            let changing = plugin_validate_project_selection(&params, options)?;
+            if changing {
+                let lifecycle = plugin_stop_service_and_invalidate_local_control(options)?;
+                match plugin_project_select(&params, options) {
+                    Ok(result) => plugin_result_with_lifecycle(result, lifecycle),
+                    Err(error) => return Err(plugin_transition_failure(error, options)),
+                }
+            } else {
+                plugin_project_select(&params, options)?
+            }
+        }
+        "binding.list" => plugin_binding_list(&params, options)?,
+        "binding.create" => plugin_binding_create(&params, options)?,
+        "binding.revoke" => {
+            plugin_confirmed(&params)?;
+            let affects_selected = plugin_binding_revoke_affects_selected(&params, options)?;
+            if affects_selected {
+                let lifecycle = plugin_stop_service_and_invalidate_local_control(options)?;
+                match plugin_binding_revoke(&params, options) {
+                    Ok(result) => plugin_result_with_lifecycle(result, lifecycle),
+                    Err(error) if error.starts_with("PLUGIN_BINDING_REVOKED_LOCAL_CLEAR_FAILED:") => {
+                        return Err(format!(
+                            "PLUGIN_CONTEXT_TRANSITION_PARTIAL: {error}; service remains stopped and local control credentials remain invalidated; retry binding.revoke to finish local cleanup"
+                        ))
+                    }
+                    Err(error) => return Err(plugin_transition_failure(error, options)),
+                }
+            } else {
+                plugin_binding_revoke(&params, options)?
+            }
+        }
+        "runner.control" => plugin_runner_control(&params)?,
+        "status" | "runner.status" => plugin_runner_status(options)?,
+        "doctor" => {
+            let args = params
+                .get("verbose")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                .then(|| "--deep".to_string())
+                .into_iter()
+                .collect::<Vec<_>>();
+            parse_json_output(run_runner_doctor(&args, options)?)?
+        }
+        "logs.tail" => plugin_logs_tail(&params)?,
+        _ => {
+            return Err(format!(
+                "PLUGIN_CONTROL_METHOD_UNSUPPORTED: unsupported bootstrap method {method}"
+            ))
+        }
+    };
+    Ok(json!({
+        "schemaVersion": PLUGIN_CONTROL_SCHEMA_VERSION,
+        "method": method,
+        "result": result,
+    })
+    .to_string())
+}
+
+fn plugin_control_is_lifecycle_mutation(method: &str) -> bool {
+    matches!(
+        method,
+        "setup.apply"
+            | "setup.rollback"
+            | "auth.start"
+            | "auth.wait"
+            | "auth.logout"
+            | "org.select"
+            | "project.select"
+            | "binding.create"
+            | "binding.revoke"
+            | "runner.control"
+    )
+}
+
+fn parse_json_output(output: String) -> Result<Value, String> {
+    serde_json::from_str(&output)
+        .map_err(|err| format!("PLUGIN_CONTROL_INTERNAL_JSON_INVALID: {err}"))
+}
+
+fn plugin_result_with_lifecycle(mut result: Value, lifecycle: Value) -> Value {
+    if let Some(object) = result.as_object_mut() {
+        object.insert("lifecycle".to_string(), lifecycle);
+        result
+    } else {
+        json!({"result": result, "lifecycle": lifecycle})
+    }
+}
+
+fn plugin_required_string<'a>(params: &'a Value, key: &str) -> Result<&'a str, String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("PLUGIN_CONTROL_PARAMETER_REQUIRED: {key} is required"))
+}
+
+fn plugin_org_list(options: &GlobalOptions) -> Result<Value, String> {
+    let config = load_cli_config()?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let credential = load_user_credential(&store, &resolved.profile)?;
+    let mut client = HttpManagementApiClient::new(&resolved.server_url, resolved.host_header)
+        .map_err(format_core_error)?;
+    let items = client
+        .list_organizations(&credential)
+        .map_err(format_core_error)?;
+    Ok(json!({"items": items}))
+}
+
+fn plugin_org_select(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
+    let organization_id = plugin_required_string(params, "organizationId")?;
+    let config_path = cli_config_path();
+    let mut config = load_cli_config_from(&config_path)?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let credential = load_user_credential(&store, &resolved.profile)?;
+    let mut client = HttpManagementApiClient::new(&resolved.server_url, resolved.host_header)
+        .map_err(format_core_error)?;
+    let organization = client
+        .list_organizations(&credential)
+        .map_err(format_core_error)?
+        .into_iter()
+        .find(|item| item.id == organization_id)
+        .ok_or_else(|| format!("ORG_NOT_FOUND: {organization_id}"))?;
+    let scope_changed = resolved.organization_id.as_deref() != Some(organization_id);
+    if !scope_changed {
+        return Ok(json!({
+            "profile": resolved.profile,
+            "organization": organization,
+            "changed": false,
+        }));
+    }
+    if scope_changed {
+        clear_plugin_runner_scope(&mut config, &resolved.profile, true)?;
+    }
+    config
+        .set_key(
+            &format!("profiles.{}.organizationId", resolved.profile),
+            organization.id.clone(),
+        )
+        .map_err(format_core_error)?;
+    config
+        .set_key(
+            &format!("profiles.{}.projectId", resolved.profile),
+            String::new(),
+        )
+        .map_err(format_core_error)?;
+    config.save(&config_path).map_err(format_core_error)?;
+    store.delete(&resolved.profile).map_err(format_core_error)?;
+    Ok(json!({"profile": resolved.profile, "organization": organization, "changed": true}))
+}
+
+fn plugin_validate_org_selection(params: &Value, options: &GlobalOptions) -> Result<bool, String> {
+    let organization_id = plugin_required_string(params, "organizationId")?;
+    let config = load_cli_config()?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let credential = load_user_credential(&store, &resolved.profile)?;
+    let mut client = HttpManagementApiClient::new(&resolved.server_url, resolved.host_header)
+        .map_err(format_core_error)?;
+    let exists = client
+        .list_organizations(&credential)
+        .map_err(format_core_error)?
+        .into_iter()
+        .any(|organization| organization.id == organization_id);
+    if !exists {
+        return Err(format!("ORG_NOT_FOUND: {organization_id}"));
+    }
+    Ok(resolved.organization_id.as_deref() != Some(organization_id))
+}
+
+fn plugin_project_list(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
+    let config = load_cli_config()?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let organization_id = params
+        .get("organizationId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or(resolved.organization_id.as_deref())
+        .ok_or_else(|| "PROJECT_CONTEXT_MISSING: select or provide an organization".to_string())?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let credential = load_user_credential(&store, &resolved.profile)?;
+    let mut client = HttpManagementApiClient::new(&resolved.server_url, resolved.host_header)
+        .map_err(format_core_error)?;
+    let projects = client
+        .list_projects(&credential, organization_id)
+        .map_err(format_core_error)?;
+    Ok(json!({"items": projects, "organizationId": organization_id}))
+}
+
+fn plugin_project_select(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
+    let project_id = plugin_required_string(params, "projectId")?;
+    let config_path = cli_config_path();
+    let mut config = load_cli_config_from(&config_path)?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let credential = load_user_credential(&store, &resolved.profile)?;
+    let mut client = HttpManagementApiClient::new(&resolved.server_url, resolved.host_header)
+        .map_err(format_core_error)?;
+    let project = client
+        .get_project(&credential, project_id)
+        .map_err(format_core_error)?;
+    if let Some(selected_organization_id) = resolved.organization_id.as_deref() {
+        if project.organization_id != selected_organization_id {
+            return Err(
+                "PROJECT_ORGANIZATION_MISMATCH: project belongs to another organization"
+                    .to_string(),
+            );
+        }
+    }
+    if project.status != "active" {
+        return Err(format!(
+            "PROJECT_UNAVAILABLE: project status is {}",
+            project.status
+        ));
+    }
+    let scope_changed = resolved.project_id.as_deref() != Some(project_id);
+    if scope_changed {
+        clear_plugin_runner_scope(&mut config, &resolved.profile, false)?;
+    }
+    config
+        .set_key(
+            &format!("profiles.{}.organizationId", resolved.profile),
+            project.organization_id.clone(),
+        )
+        .map_err(format_core_error)?;
+    config
+        .set_key(
+            &format!("profiles.{}.projectId", resolved.profile),
+            project.id.clone(),
+        )
+        .map_err(format_core_error)?;
+    config.save(&config_path).map_err(format_core_error)?;
+    if scope_changed {
+        store.delete(&resolved.profile).map_err(format_core_error)?;
+    }
+    Ok(json!({"profile": resolved.profile, "project": project, "changed": scope_changed}))
+}
+
+fn plugin_validate_project_selection(
+    params: &Value,
+    options: &GlobalOptions,
+) -> Result<bool, String> {
+    let project_id = plugin_required_string(params, "projectId")?;
+    let config = load_cli_config()?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let credential = load_user_credential(&store, &resolved.profile)?;
+    let mut client = HttpManagementApiClient::new(&resolved.server_url, resolved.host_header)
+        .map_err(format_core_error)?;
+    let project = client
+        .get_project(&credential, project_id)
+        .map_err(format_core_error)?;
+    if resolved
+        .organization_id
+        .as_deref()
+        .is_some_and(|organization_id| project.organization_id != organization_id)
+    {
+        return Err(
+            "PROJECT_ORGANIZATION_MISMATCH: project belongs to another organization".to_string(),
+        );
+    }
+    if project.status != "active" {
+        return Err(format!(
+            "PROJECT_UNAVAILABLE: project status is {}",
+            project.status
+        ));
+    }
+    Ok(resolved.project_id.as_deref() != Some(project_id))
+}
+
+fn clear_plugin_runner_scope(
+    config: &mut CliConfig,
+    profile: &str,
+    clear_project: bool,
+) -> Result<(), String> {
+    let mut keys = vec!["runnerId", "bindingId", "workspacePath"];
+    if clear_project {
+        keys.push("projectId");
+    }
+    for key in keys {
+        config
+            .set_key(&format!("profiles.{profile}.{key}"), String::new())
+            .map_err(format_core_error)?;
+    }
+    Ok(())
+}
+
+fn plugin_binding_create(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
+    let project_id = plugin_required_string(params, "projectId")?;
+    let workspace_path = params
+        .get("workspacePath")
+        .or_else(|| params.get("localRootPath"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "PLUGIN_CONTROL_PARAMETER_REQUIRED: workspacePath is required".to_string()
+        })?;
+    let config_path = cli_config_path();
+    let mut config = load_cli_config_from(&config_path)?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let user_credential = load_user_credential(&store, &resolved.profile)?;
+    let mut client = HttpManagementApiClient::new(&resolved.server_url, resolved.host_header)
+        .map_err(format_core_error)?;
+    let mut result = create_plugin_binding_with(
+        project_id,
+        workspace_path,
+        &resolved.profile,
+        &mut config,
+        &config_path,
+        &store,
+        &user_credential,
+        &mut client,
+    )?;
+    let activation = match plugin_activate_installed_service_after_bootstrap(options) {
+        Ok(value) => value,
+        Err(error) => json!({
+            "attempted": true,
+            "healthy": false,
+            "error": error,
+        }),
+    };
+    if let Some(object) = result.as_object_mut() {
+        object.insert("serviceActivation".to_string(), activation);
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_plugin_binding_with<C: ManagementApiClient, S: CredentialStore + ?Sized>(
+    project_id: &str,
+    workspace_path: &str,
+    profile: &str,
+    config: &mut CliConfig,
+    config_path: &Path,
+    store: &S,
+    user_credential: &ManagementCredential,
+    client: &mut C,
+) -> Result<Value, String> {
+    let workspace = validate_workspace_path(workspace_path)?;
+    let project = client
+        .get_project(user_credential, project_id)
+        .map_err(format_core_error)?;
+    if project.status != "active" {
+        return Err(format!(
+            "PROJECT_UNAVAILABLE: project status is {}",
+            project.status
+        ));
+    }
+    let existing_runner_credential = store.load(profile).map_err(format_core_error)?;
+    if let Some(credential) = existing_runner_credential.as_ref() {
+        credential
+            .validate_not_expiring(
+                current_epoch_seconds()?,
+                MANAGEMENT_TOKEN_CLOCK_SKEW_SECONDS,
+            )
+            .map_err(format_core_error)?;
+        validate_runner_credential_compatibility(credential)?;
+        let bindings = client
+            .list_project_runner_bindings(credential, project_id)
+            .map_err(format_core_error)?;
+        if let Some(binding) = bindings.into_iter().find(|binding| {
+            binding.status == "active"
+                && binding.project_id == project_id
+                && binding.local_root_path == workspace.display_path
+        }) {
+            persist_plugin_binding_context(
+                config,
+                config_path,
+                profile,
+                project_id,
+                &project.organization_id,
+                &binding.runner_id,
+                &binding.id,
+                &workspace.display_path,
+            )?;
+            return Ok(json!({
+                "profile": profile,
+                "projectId": project_id,
+                "organizationId": project.organization_id,
+                "runnerId": binding.runner_id,
+                "binding": binding,
+                "workspace": {
+                    "path": workspace.display_path,
+                    "fingerprint": workspace.fingerprint,
+                },
+                "bootstrapped": false,
+                "reused": true,
+            }));
+        }
+    }
+
+    let (runner_credential, runner_id, bootstrapped) = if let Some(credential) =
+        existing_runner_credential
+    {
+        let configured_runner_id = config
+            .profiles
+            .get(profile)
+            .and_then(|state| state.runner_id.clone());
+        let runner_id = if let Some(runner_id) = configured_runner_id {
+            runner_id
+        } else {
+            let status = client
+                .get_runner_self_status(&credential)
+                .map_err(format_core_error)?;
+            status
+                .get("data")
+                .and_then(|value| value.get("runner"))
+                .or_else(|| status.get("runner"))
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| "RUNNER_SELF_RESPONSE_INVALID: runner.id is required".to_string())?
+        };
+        (credential, runner_id, false)
+    } else {
+        let exchange = client
+            .bootstrap_runner_with_workspace_token(
+                &user_credential.access_token,
+                &project.organization_id,
+                Some(project_id),
+                Some(&workspace.display_path),
+            )
+            .map_err(format_core_error)?;
+        let runner_id = exchange
+            .runner_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "RUNNER_BOOTSTRAP_RESPONSE_INVALID: runnerId is required".to_string())?;
+        let runner_credential = ManagementCredential::from_runner_token_response(
+            profile,
+            &project.organization_id,
+            exchange.token,
+            user_credential.storage_backend,
+        )
+        .map_err(format_core_error)?;
+        store.save(&runner_credential).map_err(format_core_error)?;
+        (runner_credential, runner_id, true)
+    };
+    let binding = client
+        .create_project_runner_binding(
+            &runner_credential,
+            project_id,
+            &ProjectRunnerBindingCreateRequest {
+                organization_id: project.organization_id.clone(),
+                runner_id: runner_id.clone(),
+                local_root_path: workspace.display_path.clone(),
+                local_root_fingerprint: Some(workspace.fingerprint.clone()),
+            },
+            &idempotency_key("plugin-binding-create", &workspace.display_path),
+        )
+        .map_err(format_core_error)?;
+    persist_plugin_binding_context(
+        config,
+        config_path,
+        profile,
+        project_id,
+        &project.organization_id,
+        &runner_id,
+        &binding.id,
+        &workspace.display_path,
+    )?;
+
+    Ok(json!({
+        "profile": profile,
+        "projectId": project_id,
+        "organizationId": project.organization_id,
+        "runnerId": runner_id,
+        "binding": binding,
+        "workspace": {
+            "path": workspace.display_path,
+            "fingerprint": workspace.fingerprint,
+        },
+        "bootstrapped": bootstrapped,
+        "reused": false,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_plugin_binding_context(
+    config: &mut CliConfig,
+    config_path: &Path,
+    profile: &str,
+    project_id: &str,
+    organization_id: &str,
+    runner_id: &str,
+    binding_id: &str,
+    workspace_path: &str,
+) -> Result<(), String> {
+    for (key, value) in [
+        ("organizationId", organization_id),
+        ("projectId", project_id),
+        ("runnerId", runner_id),
+        ("bindingId", binding_id),
+        ("workspacePath", workspace_path),
+    ] {
+        config
+            .set_key(&format!("profiles.{profile}.{key}"), value.to_string())
+            .map_err(format_core_error)?;
+    }
+    config.save(config_path).map_err(format_core_error)
+}
+
+fn plugin_binding_list(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
+    let config = load_cli_config()?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let project_id = params
+        .get("projectId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or(resolved.project_id.as_deref())
+        .ok_or_else(|| "PROJECT_CONTEXT_MISSING: select or provide a project".to_string())?;
+    let requested_status = params
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("all");
+    let store = SystemCredentialStore::new(credential_dir());
+    let Some(credential) = store.load(&resolved.profile).map_err(format_core_error)? else {
+        return Ok(json!({
+            "bindings": [],
+            "projectId": project_id,
+            "notBootstrapped": true,
+        }));
+    };
+    credential
+        .validate_not_expiring(
+            current_epoch_seconds()?,
+            MANAGEMENT_TOKEN_CLOCK_SKEW_SECONDS,
+        )
+        .map_err(format_core_error)?;
+    let mut client = HttpManagementApiClient::new(&resolved.server_url, resolved.host_header)
+        .map_err(format_core_error)?;
+    let mut bindings = client
+        .list_project_runner_bindings(&credential, project_id)
+        .map_err(format_core_error)?;
+    if requested_status != "all" {
+        bindings.retain(|binding| binding.status == requested_status);
+    }
+    Ok(json!({
+        "bindings": bindings,
+        "projectId": project_id,
+        "notBootstrapped": false,
+    }))
+}
+
+fn plugin_binding_revoke(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
+    let binding_id = plugin_required_string(params, "bindingId")?;
+    let project_id = plugin_required_string(params, "projectId")?;
+    let config_path = cli_config_path();
+    let mut config = load_cli_config_from(&config_path)?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let credential = load_credential(&store, &resolved.profile)?;
+    let mut client = HttpManagementApiClient::new(&resolved.server_url, resolved.host_header)
+        .map_err(format_core_error)?;
+    client
+        .revoke_project_runner_binding(
+            &credential,
+            project_id,
+            binding_id,
+            &idempotency_key("plugin-binding-revoke", binding_id),
+        )
+        .map_err(format_core_error)?;
+    let selected_binding_cleared = resolved.binding_id.as_deref() == Some(binding_id);
+    if selected_binding_cleared {
+        for key in ["bindingId", "workspacePath"] {
+            config
+                .set_key(
+                    &format!("profiles.{}.{}", resolved.profile, key),
+                    String::new(),
+                )
+                .map_err(|error| {
+                    format!(
+                        "PLUGIN_BINDING_REVOKED_LOCAL_CLEAR_FAILED: {}",
+                        format_core_error(error)
+                    )
+                })?;
+        }
+        config.save(&config_path).map_err(|error| {
+            format!(
+                "PLUGIN_BINDING_REVOKED_LOCAL_CLEAR_FAILED: {}",
+                format_core_error(error)
+            )
+        })?;
+    }
+    Ok(json!({
+        "revoked": true,
+        "bindingId": binding_id,
+        "projectId": project_id,
+        "selectedBindingCleared": selected_binding_cleared,
+    }))
+}
+
+fn plugin_binding_revoke_affects_selected(
+    params: &Value,
+    options: &GlobalOptions,
+) -> Result<bool, String> {
+    let binding_id = plugin_required_string(params, "bindingId")?;
+    let config = load_cli_config()?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    Ok(resolved.binding_id.as_deref() == Some(binding_id))
+}
+
+fn plugin_logs_tail(params: &Value) -> Result<Value, String> {
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(100)
+        .clamp(1, 200) as usize;
+    let offset = params
+        .get("cursor")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let level = params.get("level").and_then(Value::as_str);
+    let mut entries =
+        read_recent_log_entries(default_log_path(), 1_000).map_err(format_core_error)?;
+    if let Some(level) = level {
+        entries.retain(|entry| entry.level == level);
+    }
+    entries.reverse();
+    let total = entries.len();
+    let entries = entries
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(redact_log_entry_for_output)
+        .collect::<Vec<_>>();
+    let next_cursor =
+        (offset + entries.len() < total).then(|| (offset + entries.len()).to_string());
+    Ok(json!({"entries": entries, "nextCursor": next_cursor}))
+}
+
+fn plugin_confirmed(params: &Value) -> Result<(), String> {
+    if params.get("confirm").and_then(Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err("PLUGIN_CONTROL_CONFIRMATION_REQUIRED: confirm must be true".to_string())
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct PluginSetupTransactionLock {
+    file: fs::File,
+}
+
+#[cfg(unix)]
+impl PluginSetupTransactionLock {
+    fn acquire() -> Result<Self, String> {
+        Self::acquire_with_attempts(50)
+    }
+
+    fn acquire_with_attempts(attempts: usize) -> Result<Self, String> {
+        Self::acquire_at_with_attempts(&plugin_lifecycle_root()?, attempts)
+    }
+
+    fn acquire_at_with_attempts(root: &Path, attempts: usize) -> Result<Self, String> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+        match fs::symlink_metadata(root) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(
+                    "PLUGIN_SETUP_LOCK_UNSAFE: lifecycle root must be a real directory".to_string(),
+                );
+            }
+            Ok(metadata) => {
+                if metadata.uid() != unsafe { libc::geteuid() }
+                    || metadata.permissions().mode() & 0o777 != 0o700
+                {
+                    return Err("PLUGIN_SETUP_LOCK_PERMISSIONS_UNSAFE: lifecycle root must be owned by the effective user with mode 0700".to_string());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(root)
+                    .map_err(|error| format!("PLUGIN_SETUP_LOCK_CREATE_FAILED: {error}"))?;
+                let metadata = fs::symlink_metadata(root)
+                    .map_err(|error| format!("PLUGIN_SETUP_LOCK_CREATE_FAILED: {error}"))?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(
+                        "PLUGIN_SETUP_LOCK_UNSAFE: lifecycle root must be a real directory"
+                            .to_string(),
+                    );
+                }
+                fs::set_permissions(root, fs::Permissions::from_mode(0o700))
+                    .map_err(|error| format!("PLUGIN_SETUP_LOCK_CREATE_FAILED: {error}"))?;
+            }
+            Err(error) => {
+                return Err(format!("PLUGIN_SETUP_LOCK_INSPECTION_FAILED: {error}"));
+            }
+        }
+        let path = root.join(".setup.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|error| format!("PLUGIN_SETUP_LOCK_OPEN_FAILED: {error}"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("PLUGIN_SETUP_LOCK_INSPECTION_FAILED: {error}"))?;
+        if !metadata.is_file() {
+            return Err("PLUGIN_SETUP_LOCK_UNSAFE: lock must be a regular file".to_string());
+        }
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o777 != 0o600
+        {
+            return Err("PLUGIN_SETUP_LOCK_PERMISSIONS_UNSAFE: lock must be owned by the effective user with mode 0600".to_string());
+        }
+        for attempt in 0..attempts.max(1) {
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result == 0 {
+                return Ok(Self { file });
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(format!("PLUGIN_SETUP_LOCK_FAILED: {error}"));
+            }
+            if attempt + 1 < attempts.max(1) {
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        Err("PLUGIN_SETUP_BUSY: another Loomex setup or rollback is in progress".to_string())
+    }
+}
+
+fn plugin_lifecycle_root() -> Result<PathBuf, String> {
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "PLUGIN_SETUP_HOME_UNAVAILABLE: HOME is required for the per-user lifecycle fence"
+                .to_string()
+        })?;
+    Ok(plugin_lifecycle_root_for_home(&home))
+}
+
+fn plugin_lifecycle_root_for_home(home: &Path) -> PathBuf {
+    home.join(".loomex").join("lifecycle")
+}
+
+fn plugin_setup_transaction_store() -> Result<SetupTransactionStore, String> {
+    Ok(SetupTransactionStore::new(&plugin_lifecycle_root()?))
+}
+
+#[cfg(unix)]
+impl Drop for PluginSetupTransactionLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct PluginSetupTransactionLock;
+
+#[cfg(not(unix))]
+impl PluginSetupTransactionLock {
+    fn acquire() -> Result<Self, String> {
+        Err("LOCAL_CONTROL_PLATFORM_UNSUPPORTED: setup lock requires macOS or Linux".to_string())
+    }
+}
+
+fn plugin_setup_status(options: &GlobalOptions) -> Result<Value, String> {
+    let installer = RuntimeInstaller::for_current_user().map_err(format_core_error)?;
+    let active = installer.active_runtime().map_err(format_core_error)?;
+    let service = parse_json_output(run_runner_service_status(&[], options)?)?;
+    Ok(json!({
+        "installed": active.is_some(),
+        "runtime": active,
+        "runtimeRoot": installer.layout().root,
+        "service": service,
+        "supported": cfg!(unix),
+    }))
+}
+
+fn plugin_setup_plan(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
+    let package = plugin_package_runtime()?;
+    if let Some(version) = params.get("version").and_then(Value::as_str) {
+        if version != package.runtime_version && version != package.plugin_version {
+            return Err(format!(
+                "PLUGIN_RUNTIME_VERSION_UNAVAILABLE: package contains runtime {} (plugin {}), not {version}",
+                package.runtime_version, package.plugin_version
+            ));
+        }
+    }
+    let requested_channel = params
+        .get("channel")
+        .and_then(Value::as_str)
+        .unwrap_or(&package.channel);
+    if requested_channel != package.channel {
+        return Err(format!(
+            "PLUGIN_RUNTIME_CHANNEL_UNAVAILABLE: package contains {}, not {requested_channel}",
+            package.channel
+        ));
+    }
+    let install_service = params
+        .get("installService")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let status = plugin_setup_status(options)?;
+    let active_version = status.pointer("/runtime/version").and_then(Value::as_str);
+    let action = match active_version {
+        None => "install",
+        Some(version) if version == package.runtime_version => "repair",
+        Some(_) => "update",
+    };
+    let installer = RuntimeInstaller::for_current_user().map_err(format_core_error)?;
+    let versioned_runtime_path = installer
+        .layout()
+        .version_dir(&package.runtime_version)
+        .join("bin")
+        .join(plugin_runtime_executable_name());
+    let config_path = cli_config_path();
+    let mut service_options = RunnerServiceOptions::parse(&[], options)?;
+    service_options.binary_path = package.stable_executable.clone();
+    service_options.config_path = config_path.clone();
+    let service_path = default_service_install_path(&service_options)?;
+    let service_installed = status
+        .pointer("/service/installed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let service_active = status
+        .pointer("/service/active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let readiness = install_service
+        .then(|| plugin_service_bootstrap_readiness(options))
+        .transpose()?;
+    let ready = readiness
+        .as_ref()
+        .and_then(|value| value.get("ready"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let service_action = match (install_service, service_installed, service_active, ready) {
+        (false, _, _, _) => "preserve",
+        (true, false, _, false) => "register_deferred",
+        (true, false, _, true) => "register_start_healthcheck",
+        (true, true, false, false) => "remain_deferred",
+        (true, true, false, true) => "start_healthcheck",
+        (true, true, true, false) => "stop_and_defer",
+        (true, true, true, true) => "restart_healthcheck",
+    };
+    let previous_runtime = installer.previous_version().map_err(format_core_error)?;
+    let mut plan = json!({
+        "action": action,
+        "version": package.runtime_version,
+        "pluginVersion": package.plugin_version,
+        "packageSigningState": package.signing_state,
+        "channel": package.channel,
+        "target": package.target,
+        "runtimePath": package.stable_executable,
+        "versionedRuntimePath": versioned_runtime_path,
+        "configPath": config_path,
+        "servicePlatform": RunnerServicePlatform::current().map_err(format_core_error)?.as_str(),
+        "servicePath": service_path,
+        "serviceAction": service_action,
+        "serviceInstalled": service_installed,
+        "serviceActive": service_active,
+        "serviceReadiness": readiness,
+        "installService": install_service,
+        "requiresConfirmation": true,
+        "previousVersion": active_version,
+        "rollback": {
+            "available": previous_runtime.is_some(),
+            "targetVersion": previous_runtime,
+        },
+        "migrations": [],
+        "runningExecutions": {
+            "available": false,
+            "count": null,
+            "items": [],
+            "reason": "active execution telemetry is not exposed by runner-control",
+        },
+        "actions": [
+            "verify package integrity and target",
+            "run bundled runtime self-test before activation",
+            "atomically publish and activate the versioned runtime",
+            service_action,
+        ],
+    });
+    let plan_id = plugin_setup_plan_id(&plan)?;
+    if let Some(object) = plan.as_object_mut() {
+        object.insert("planId".to_string(), json!(plan_id));
+    }
+    Ok(plan)
+}
+
+fn plugin_setup_plan_id(reviewed_plan: &Value) -> Result<String, String> {
+    Ok(format!(
+        "loomex-setup-v1-{}",
+        sha256_hex(
+            &serde_json::to_vec(reviewed_plan)
+                .map_err(|error| format!("PLUGIN_SETUP_PLAN_SERIALIZE_FAILED: {error}"))?
+        )
+    ))
+}
+
+fn plugin_setup_apply(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
+    plugin_confirmed(params)?;
+    plugin_recover_interrupted_setup(options)?;
+    let installer = RuntimeInstaller::for_current_user().map_err(format_core_error)?;
+    let (store, mut journal) =
+        plugin_begin_setup_transaction(SetupTransactionOperation::Apply, &installer, options)?;
+    match plugin_setup_apply_transaction(params, options, &store, &mut journal) {
+        Ok(result) => {
+            store.update_phase(&mut journal, SetupTransactionPhase::Committed)?;
+            store.clear()?;
+            Ok(result)
+        }
+        Err(operation_error) => {
+            match plugin_compensate_setup_transaction(&journal, options) {
+                Ok(()) => {
+                    store.update_phase(&mut journal, SetupTransactionPhase::Compensated)?;
+                    store.clear()?;
+                    Err(format!(
+                        "PLUGIN_SETUP_FAILED_RESTORED: setup failed and prior state was restored: {operation_error}"
+                    ))
+                }
+                Err(compensation_error) => Err(format!(
+                    "PLUGIN_SETUP_RECOVERY_PENDING: setup failed ({operation_error}); compensation failed ({compensation_error}); retry setup or rollback to resume recovery"
+                )),
+            }
+        }
+    }
+}
+
+fn plugin_setup_apply_transaction(
+    params: &Value,
+    options: &GlobalOptions,
+    transaction_store: &SetupTransactionStore,
+    journal: &mut SetupTransactionJournal,
+) -> Result<Value, String> {
+    plugin_confirmed(params)?;
+    if !cfg!(unix) {
+        return Err("LOCAL_CONTROL_PLATFORM_UNSUPPORTED: durable local control currently requires macOS or Linux".to_string());
+    }
+    let package = plugin_package_runtime()?;
+    let plan_id = plugin_required_string(params, "planId")?;
+    let channel = plugin_required_string(params, "channel")?;
+    let install_service = params
+        .get("installService")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            "PLUGIN_CONTROL_PARAMETER_REQUIRED: installService is required".to_string()
+        })?;
+    if channel != package.channel {
+        return Err(
+            "PLUGIN_SETUP_PLAN_STALE: planId/options do not match the installed plugin package"
+                .to_string(),
+        );
+    }
+    let expected_plan = plugin_setup_plan(
+        &json!({
+            "version": package.plugin_version,
+            "channel": channel,
+            "installService": install_service,
+        }),
+        options,
+    )?;
+    if expected_plan.get("planId").and_then(Value::as_str) != Some(plan_id) {
+        return Err(
+            "PLUGIN_SETUP_PLAN_STALE: reviewed setup state changed; generate and approve a new plan"
+                .to_string(),
+        );
+    }
+    let service_was_installed = expected_plan
+        .get("serviceInstalled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let service_was_active = expected_plan
+        .get("serviceActive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let service_readiness = expected_plan.get("serviceReadiness").cloned();
+    let service_ready = service_readiness
+        .as_ref()
+        .and_then(|value| value.get("ready"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let stopped_for_deferred_start = if install_service && service_was_active && !service_ready {
+        Some(plugin_runner_control(&json!({
+            "action": "stop",
+            "confirm": true,
+        }))?)
+    } else {
+        None
+    };
+    let bytes = fs::read(&package.source_executable)
+        .map_err(|err| format!("PLUGIN_RUNTIME_READ_FAILED: {err}"))?;
+    plugin_self_test_runtime_bytes(&bytes, &package.sha256)?;
+    let installer = RuntimeInstaller::for_current_user().map_err(format_core_error)?;
+    let outcome = installer
+        .install_bundled(BundledRuntimeInstall {
+            version: &package.runtime_version,
+            artifact_name: "loomex-plugin-runtime",
+            artifact_sha256: &package.sha256,
+            artifact_os: env::consts::OS,
+            artifact_arch: env::consts::ARCH,
+            artifact_bytes: &bytes,
+            executable_name: plugin_runtime_executable_name(),
+        })
+        .map_err(format_core_error)?;
+    transaction_store.update_phase(journal, SetupTransactionPhase::RuntimeActivated)?;
+
+    let config_path = cli_config_path();
+    if !config_path.exists() {
+        CliConfig::default()
+            .save(&config_path)
+            .map_err(format_core_error)?;
+    }
+    transaction_store.update_phase(journal, SetupTransactionPhase::ConfigSaved)?;
+
+    // The stable runtime is published before service registration. If service
+    // activation fails, restore the prior active pointer when one exists and
+    // return an explicit recoverable partial-state error otherwise.
+    let service_result = (|| -> Result<Value, String> {
+        Ok(
+            match plugin_setup_service_disposition(install_service, service_was_installed) {
+                PluginSetupServiceDisposition::Preserve => json!({
+                    "installed": service_was_installed,
+                    "changed": false,
+                    "skipped": true,
+                    "reason": "installService=false",
+                }),
+                PluginSetupServiceDisposition::ActivateExisting => {
+                    if service_ready {
+                        let action = if service_was_active {
+                            "restart"
+                        } else {
+                            "start"
+                        };
+                        let control =
+                            plugin_runner_control(&json!({"action": action, "confirm": true}))?;
+                        transaction_store
+                            .update_phase(journal, SetupTransactionPhase::HealthChecked)?;
+                        control
+                    } else {
+                        json!({
+                            "installed": true,
+                            "started": false,
+                            "deferredStart": true,
+                            "readiness": service_readiness,
+                            "stop": stopped_for_deferred_start,
+                        })
+                    }
+                }
+                PluginSetupServiceDisposition::Install => {
+                    let service_args = vec![
+                        "--binary".to_string(),
+                        package.stable_executable.display().to_string(),
+                        "--config".to_string(),
+                        config_path.display().to_string(),
+                    ]
+                    .into_iter()
+                    .chain((!service_ready).then(|| "--defer-start".to_string()))
+                    .collect::<Vec<_>>();
+                    let mut installed =
+                        parse_json_output(run_runner_service_install(&service_args, options)?)?;
+                    transaction_store
+                        .update_phase(journal, SetupTransactionPhase::ServiceRegistered)?;
+                    if service_ready {
+                        transaction_store
+                            .update_phase(journal, SetupTransactionPhase::ServiceStarted)?;
+                        let health =
+                            plugin_wait_for_local_control_health(20, Duration::from_millis(250))?;
+                        transaction_store
+                            .update_phase(journal, SetupTransactionPhase::HealthChecked)?;
+                        if let Some(object) = installed.as_object_mut() {
+                            object.insert("health".to_string(), health);
+                        }
+                    }
+                    installed
+                }
+            },
+        )
+    })();
+    let service = service_result?;
+    Ok(json!({
+        "installed": true,
+        "version": outcome.activation.active.version,
+        "previousVersion": outcome.activation.previous_version,
+        "reusedExistingVersion": outcome.reused_existing_version,
+        "runtimePath": package.stable_executable,
+        "channel": package.channel,
+        "installService": install_service,
+        "serviceReadiness": service_readiness,
+        "stoppedForDeferredStart": stopped_for_deferred_start,
+        "service": service,
+    }))
+}
+
+fn plugin_begin_setup_transaction(
+    operation: SetupTransactionOperation,
+    installer: &RuntimeInstaller,
+    options: &GlobalOptions,
+) -> Result<(SetupTransactionStore, SetupTransactionJournal), String> {
+    let store = plugin_setup_transaction_store()?;
+    let service_options = RunnerServiceOptions::parse(&[], options)?;
+    let mut probe = OsTransactionServiceStatusProbe;
+    plugin_begin_setup_transaction_with_probe(
+        operation,
+        installer,
+        &service_options,
+        store,
+        &mut probe,
+    )
+}
+
+fn plugin_begin_setup_transaction_with_probe(
+    operation: SetupTransactionOperation,
+    installer: &RuntimeInstaller,
+    service_options: &RunnerServiceOptions,
+    store: SetupTransactionStore,
+    probe: &mut dyn TransactionServiceStatusProbe,
+) -> Result<(SetupTransactionStore, SetupTransactionJournal), String> {
+    // Probe before capturing or persisting any transaction state. Unknown
+    // manager/command failures must never be serialized as false booleans.
+    let service_state = probe.probe(service_options)?;
+    let config = FileSnapshot::capture(cli_config_path())?;
+    let service_file = FileSnapshot::capture(default_service_install_path(service_options)?)?;
+    if service_state.installed && service_file.bytes.is_none() {
+        return Err(
+            "PLUGIN_SETUP_SNAPSHOT_INCONSISTENT: managed service is installed but its service file is missing"
+                .to_string(),
+        );
+    }
+    let (active_runtime_version, previous_runtime_version) =
+        plugin_capture_runtime_pointer_state(installer)?;
+    let snapshot = SetupTransactionSnapshot {
+        runtime_root: installer.layout().root.clone(),
+        active_runtime_version,
+        previous_runtime_version,
+        config,
+        service_file,
+        service_installed: service_state.installed,
+        service_enabled: service_state.enabled,
+        service_active: service_state.active,
+    };
+    let journal = store.begin(operation, snapshot)?;
+    Ok((store, journal))
+}
+
+fn plugin_capture_runtime_pointer_state(
+    installer: &RuntimeInstaller,
+) -> Result<(Option<String>, Option<String>), String> {
+    Ok((
+        installer.active_version().map_err(format_core_error)?,
+        installer.previous_version().map_err(format_core_error)?,
+    ))
+}
+
+fn plugin_reject_unfinished_setup_transaction() -> Result<(), String> {
+    let store = plugin_setup_transaction_store()?;
+    plugin_reject_unfinished_setup_transaction_at(&store)
+}
+
+fn plugin_reject_unfinished_setup_transaction_at(
+    store: &SetupTransactionStore,
+) -> Result<(), String> {
+    let Some(journal) = store.load()? else {
+        return Ok(());
+    };
+    if matches!(
+        journal.phase,
+        SetupTransactionPhase::Committed | SetupTransactionPhase::Compensated
+    ) {
+        return store.clear();
+    }
+    Err(format!(
+        "PLUGIN_SETUP_RECOVERY_REQUIRED: an unfinished {:?} transaction at {:?} must be recovered by setup.apply or setup.rollback before changing lifecycle state",
+        journal.operation, journal.phase
+    ))
+}
+
+fn plugin_recover_interrupted_setup(options: &GlobalOptions) -> Result<Option<Value>, String> {
+    let store = plugin_setup_transaction_store()?;
+    let Some(mut journal) = store.load()? else {
+        return Ok(None);
+    };
+    if matches!(
+        journal.phase,
+        SetupTransactionPhase::Committed | SetupTransactionPhase::Compensated
+    ) {
+        store.clear()?;
+        return Ok(Some(json!({
+            "recovered": true,
+            "action": "cleared_completed_journal",
+        })));
+    }
+    plugin_compensate_setup_transaction(&journal, options).map_err(|error| {
+        format!(
+            "PLUGIN_SETUP_RECOVERY_FAILED: unfinished {:?} transaction at {:?} could not be compensated: {error}",
+            journal.operation, journal.phase
+        )
+    })?;
+    store.update_phase(&mut journal, SetupTransactionPhase::Compensated)?;
+    store.clear()?;
+    Ok(Some(json!({
+        "recovered": true,
+        "action": "compensated_interrupted_transaction",
+    })))
+}
+
+fn plugin_compensate_setup_transaction(
+    journal: &SetupTransactionJournal,
+    options: &GlobalOptions,
+) -> Result<(), String> {
+    let mut probe = OsTransactionServiceStatusProbe;
+    let mut runner = OsServiceCommandRunner;
+    plugin_compensate_setup_transaction_with(journal, options, &mut probe, &mut runner)
+}
+
+fn plugin_compensate_setup_transaction_with(
+    journal: &SetupTransactionJournal,
+    options: &GlobalOptions,
+    probe: &mut dyn TransactionServiceStatusProbe,
+    runner: &mut dyn ServiceCommandRunner,
+) -> Result<(), String> {
+    let snapshot = &journal.snapshot;
+    let mut errors = Vec::new();
+    let service_options = RunnerServiceOptions::parse(&[], options)?;
+    let current = probe.probe(&service_options)?;
+
+    if current.installed || current.enabled || current.active {
+        let commands = service_compensation_quiesce_commands(
+            &service_options,
+            current.active,
+            current.enabled,
+        )?;
+        if let Err(error) = plugin_quiesce_service_for_compensation_with_runner(&commands, runner) {
+            errors.push(format!("quiesce current service: {error}"));
+        }
+    }
+
+    let installer = RuntimeInstaller::new(&snapshot.runtime_root);
+    if let Err(error) = installer
+        .restore_active_version(snapshot.active_runtime_version.as_deref())
+        .map_err(format_core_error)
+    {
+        errors.push(format!("restore runtime pointer: {error}"));
+    }
+    if let Err(error) = installer
+        .restore_previous_version(snapshot.previous_runtime_version.as_deref())
+        .map_err(format_core_error)
+    {
+        errors.push(format!("restore previous runtime pointer: {error}"));
+    }
+    match installer.active_runtime().map_err(format_core_error) {
+        Ok(restored) => {
+            let restored_version = restored.as_ref().map(|runtime| runtime.version.as_str());
+            if restored_version != snapshot.active_runtime_version.as_deref() {
+                errors.push(format!(
+                    "restored runtime identity mismatch: expected {:?}, got {:?}",
+                    snapshot.active_runtime_version, restored_version
+                ));
+            }
+        }
+        Err(error) => errors.push(format!("verify restored runtime executable: {error}")),
+    }
+    match installer.previous_version().map_err(format_core_error) {
+        Ok(restored) if restored != snapshot.previous_runtime_version => errors.push(format!(
+            "restored previous runtime identity mismatch: expected {:?}, got {restored:?}",
+            snapshot.previous_runtime_version
+        )),
+        Ok(_) => {}
+        Err(error) => errors.push(format!("verify restored previous runtime pointer: {error}")),
+    }
+    if let Err(error) = snapshot.config.restore() {
+        errors.push(format!("restore config: {error}"));
+    }
+    if let Err(error) = snapshot.service_file.restore() {
+        errors.push(format!("restore service file: {error}"));
+    }
+    // The service manager must observe the exact restored/deleted unit file,
+    // so reload strictly follows FileSnapshot::restore in both branches.
+    if let Err(error) = plugin_reload_service_registration_with_runner(options, runner) {
+        errors.push(format!("reload restored service registration: {error}"));
+    }
+    if let Err(error) = plugin_restore_service_enablement_with_runner(snapshot, options, runner) {
+        errors.push(format!("restore service enablement: {error}"));
+    }
+    if let Err(error) = plugin_restore_service_activity_with_runner(snapshot, options, runner) {
+        errors.push(format!("restore active service: {error}"));
+    }
+
+    match probe.probe(&service_options) {
+        Ok(restored) => {
+            if restored.installed != snapshot.service_installed
+                || restored.enabled != snapshot.service_enabled
+                || restored.active != snapshot.service_active
+            {
+                errors.push(format!(
+                    "service state mismatch after compensation: expected installed={} enabled={} active={}, got installed={} enabled={} active={}",
+                    snapshot.service_installed, snapshot.service_enabled, snapshot.service_active,
+                    restored.installed, restored.enabled, restored.active
+                ));
+            }
+        }
+        Err(error) => errors.push(format!("verify restored service state: {error}")),
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn plugin_reload_service_registration_with_runner(
+    options: &GlobalOptions,
+    runner: &mut dyn ServiceCommandRunner,
+) -> Result<(), String> {
+    let service_options = RunnerServiceOptions::parse(&[], options)?;
+    if matches!(
+        service_options.platform,
+        RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd
+    ) {
+        runner.run(&systemctl_command(
+            service_options.platform,
+            &["daemon-reload"],
+        ))?;
+    }
+    Ok(())
+}
+
+fn plugin_run_service_commands_with_runner(
+    commands: &[ServiceCommand],
+    runner: &mut dyn ServiceCommandRunner,
+) -> Result<(), String> {
+    for command in commands {
+        runner.run(command)?;
+    }
+    Ok(())
+}
+
+fn plugin_quiesce_service_for_compensation_with_runner(
+    commands: &[ServiceCommand],
+    runner: &mut dyn ServiceCommandRunner,
+) -> Result<(), String> {
+    for command in commands {
+        runner.run(command)?;
+    }
+    Ok(())
+}
+
+fn plugin_restore_service_enablement_with_runner(
+    snapshot: &SetupTransactionSnapshot,
+    options: &GlobalOptions,
+    runner: &mut dyn ServiceCommandRunner,
+) -> Result<(), String> {
+    let service_options = RunnerServiceOptions::parse(&[], options)?;
+    let commands = service_compensation_enablement_commands(
+        &service_options,
+        snapshot.service_installed,
+        snapshot.service_enabled,
+    )?;
+    plugin_run_service_commands_with_runner(&commands, runner)
+}
+
+fn plugin_restore_service_activity_with_runner(
+    snapshot: &SetupTransactionSnapshot,
+    options: &GlobalOptions,
+    runner: &mut dyn ServiceCommandRunner,
+) -> Result<(), String> {
+    let service_options = RunnerServiceOptions::parse(&[], options)?;
+    let commands = service_compensation_activity_commands(
+        &service_options,
+        snapshot.service_installed,
+        snapshot.service_active,
+    )?;
+    plugin_run_service_commands_with_runner(&commands, runner)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginSetupServiceDisposition {
+    Preserve,
+    ActivateExisting,
+    Install,
+}
+
+fn plugin_setup_service_disposition(
+    install_service: bool,
+    service_was_installed: bool,
+) -> PluginSetupServiceDisposition {
+    match (install_service, service_was_installed) {
+        (false, _) => PluginSetupServiceDisposition::Preserve,
+        (true, true) => PluginSetupServiceDisposition::ActivateExisting,
+        (true, false) => PluginSetupServiceDisposition::Install,
+    }
+}
+
+fn plugin_setup_rollback(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
+    plugin_confirmed(params)?;
+    plugin_recover_interrupted_setup(options)?;
+    let installer = RuntimeInstaller::for_current_user().map_err(format_core_error)?;
+    let (store, mut journal) =
+        plugin_begin_setup_transaction(SetupTransactionOperation::Rollback, &installer, options)?;
+    match plugin_setup_rollback_transaction(params, options, &store, &mut journal) {
+        Ok(result) => {
+            store.update_phase(&mut journal, SetupTransactionPhase::Committed)?;
+            store.clear()?;
+            Ok(result)
+        }
+        Err(operation_error) => {
+            match plugin_compensate_setup_transaction(&journal, options) {
+                Ok(()) => {
+                    store.update_phase(&mut journal, SetupTransactionPhase::Compensated)?;
+                    store.clear()?;
+                    Err(format!(
+                        "PLUGIN_ROLLBACK_FAILED_RESTORED: rollback failed and prior state was restored: {operation_error}"
+                    ))
+                }
+                Err(compensation_error) => Err(format!(
+                    "PLUGIN_SETUP_RECOVERY_PENDING: rollback failed ({operation_error}); compensation failed ({compensation_error}); retry setup or rollback to resume recovery"
+                )),
+            }
+        }
+    }
+}
+
+fn plugin_setup_rollback_transaction(
+    params: &Value,
+    options: &GlobalOptions,
+    transaction_store: &SetupTransactionStore,
+    journal: &mut SetupTransactionJournal,
+) -> Result<Value, String> {
+    plugin_confirmed(params)?;
+    let setup_status = plugin_setup_status(options)?;
+    let service_installed = setup_status
+        .pointer("/service/installed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let service_active = setup_status
+        .pointer("/service/active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // Resolve readiness before mutating the active pointer. A diagnostic error
+    // must not turn a requested rollback into an unreported partial rollback.
+    let readiness = service_installed
+        .then(|| plugin_service_bootstrap_readiness(options))
+        .transpose()?;
+    let ready = readiness
+        .as_ref()
+        .and_then(|value| value.get("ready"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let stopped_for_deferred_start = if service_active && !ready {
+        Some(plugin_runner_control(&json!({
+            "action": "stop",
+            "confirm": true,
+        }))?)
+    } else {
+        None
+    };
+    let installer = RuntimeInstaller::for_current_user().map_err(format_core_error)?;
+    let activation_result =
+        if let Some(version) = params.get("targetVersion").and_then(Value::as_str) {
+            installer.rollback_to(version)
+        } else {
+            installer.rollback_to_previous()
+        };
+    let activation = match activation_result {
+        Ok(activation) => activation,
+        Err(error) => {
+            if stopped_for_deferred_start.is_some() {
+                return Err(format!(
+                    "PLUGIN_ROLLBACK_FAILED_SERVICE_STOPPED: rollback failed ({}); prior runtime pointer is unchanged and the unauthenticated/unbound service remains stopped until bootstrap completes",
+                    format_core_error(error)
+                ));
+            }
+            return Err(format_core_error(error));
+        }
+    };
+    transaction_store.update_phase(journal, SetupTransactionPhase::RuntimeActivated)?;
+    let control = if service_installed && ready {
+        match plugin_activate_installed_service_after_bootstrap(options) {
+            Ok(value) => {
+                transaction_store.update_phase(journal, SetupTransactionPhase::HealthChecked)?;
+                Some(value)
+            }
+            Err(restart_error) => return Err(restart_error),
+        }
+    } else if service_installed {
+        Some(json!({
+            "installed": true,
+            "started": false,
+            "deferredStart": true,
+            "reason": readiness.as_ref().and_then(|value| value.get("reason")),
+        }))
+    } else {
+        None
+    };
+    Ok(json!({
+        "rolledBack": true,
+        "version": activation.active.version,
+        "previousVersion": activation.previous_version,
+        "service": control,
+        "serviceReadiness": readiness,
+        "stoppedForDeferredStart": stopped_for_deferred_start,
+    }))
+}
+
+#[derive(Debug)]
+struct PluginPackageRuntime {
+    plugin_version: String,
+    runtime_version: String,
+    channel: String,
+    signing_state: String,
+    target: String,
+    sha256: String,
+    source_executable: PathBuf,
+    stable_executable: PathBuf,
+}
+
+fn plugin_package_runtime() -> Result<PluginPackageRuntime, String> {
+    let root = env::var_os(PLUGIN_ROOT_ENV)
+        .map(PathBuf::from)
+        .ok_or_else(|| "PLUGIN_ROOT_REQUIRED: LOOMEX_PLUGIN_ROOT is not configured".to_string())?;
+    let root = fs::canonicalize(&root).map_err(|err| format!("PLUGIN_ROOT_INVALID: {err}"))?;
+    let manifest_path = root.join("packaging/runtime-manifest.json");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .map_err(|err| format!("PLUGIN_RUNTIME_MANIFEST_READ_FAILED: {err}"))?,
+    )
+    .map_err(|err| format!("PLUGIN_RUNTIME_MANIFEST_INVALID: {err}"))?;
+    if manifest.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
+        return Err("PLUGIN_RUNTIME_MANIFEST_INVALID: schemaVersion must be 1".to_string());
+    }
+    let distribution_kind = manifest
+        .get("distributionKind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "PLUGIN_RUNTIME_MANIFEST_INVALID: distributionKind is required".to_string()
+        })?;
+    if manifest
+        .get("developmentOverridesAllowed")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err(
+            "PLUGIN_RUNTIME_MANIFEST_INVALID: development overrides must be disabled".to_string(),
+        );
+    }
+    let plugin_version = manifest
+        .get("pluginVersion")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "PLUGIN_RUNTIME_MANIFEST_INVALID: pluginVersion is required".to_string())?
+        .to_string();
+    let runtime_version = manifest
+        .get("runtimeVersion")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "PLUGIN_RUNTIME_MANIFEST_INVALID: runtimeVersion is required".to_string())?
+        .to_string();
+    let channel = manifest
+        .get("channel")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "stable" | "beta"))
+        .ok_or_else(|| {
+            "PLUGIN_RUNTIME_MANIFEST_INVALID: channel must be stable or beta".to_string()
+        })?
+        .to_string();
+    let signing_state = manifest
+        .get("packageSigningState")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "unsigned-validation" | "platform-signed"))
+        .ok_or_else(|| {
+            "PLUGIN_RUNTIME_MANIFEST_INVALID: packageSigningState is invalid".to_string()
+        })?
+        .to_string();
+    validate_plugin_distribution(
+        distribution_kind,
+        &signing_state,
+        env::var(ALLOW_UNSIGNED_PLUGIN_ENV).ok().as_deref() == Some("1"),
+    )?;
+    if plugin_version.split('+').next() != Some(runtime_version.as_str()) {
+        return Err(
+            "PLUGIN_RUNTIME_MANIFEST_INVALID: runtimeVersion must match plugin base version"
+                .to_string(),
+        );
+    }
+    let plugin_manifest: Value = serde_json::from_slice(
+        &fs::read(root.join(".codex-plugin/plugin.json"))
+            .map_err(|err| format!("PLUGIN_MANIFEST_READ_FAILED: {err}"))?,
+    )
+    .map_err(|err| format!("PLUGIN_MANIFEST_INVALID: {err}"))?;
+    if plugin_manifest.get("version").and_then(Value::as_str) != Some(plugin_version.as_str()) {
+        return Err(
+            "PLUGIN_RUNTIME_MANIFEST_INVALID: pluginVersion differs from plugin.json".to_string(),
+        );
+    }
+    let target = plugin_target_key()?;
+    let entry = manifest
+        .pointer(&format!("/artifacts/{target}/runtime"))
+        .ok_or_else(|| format!("PLUGIN_RUNTIME_TARGET_UNAVAILABLE: {target}"))?;
+    let relative = entry
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "PLUGIN_RUNTIME_MANIFEST_INVALID: runtime.path is required".to_string())?;
+    let sha256 = entry
+        .get("sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "PLUGIN_RUNTIME_MANIFEST_INVALID: runtime.sha256 is required".to_string())?
+        .to_string();
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err("PLUGIN_RUNTIME_PATH_UNSAFE: runtime path escapes plugin root".to_string());
+    }
+    let source = root.join(relative_path);
+    let metadata = fs::symlink_metadata(&source)
+        .map_err(|err| format!("PLUGIN_RUNTIME_INSPECTION_FAILED: {err}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(
+            "PLUGIN_RUNTIME_PATH_UNSAFE: runtime must be a regular non-symlink file".to_string(),
+        );
+    }
+    let canonical_source = fs::canonicalize(&source)
+        .map_err(|err| format!("PLUGIN_RUNTIME_INSPECTION_FAILED: {err}"))?;
+    if !canonical_source.starts_with(&root) {
+        return Err("PLUGIN_RUNTIME_PATH_UNSAFE: runtime path escapes plugin root".to_string());
+    }
+    let installer = RuntimeInstaller::for_current_user().map_err(format_core_error)?;
+    let stable = installer
+        .layout()
+        .current
+        .join("bin")
+        .join(plugin_runtime_executable_name());
+    Ok(PluginPackageRuntime {
+        plugin_version,
+        runtime_version,
+        channel,
+        signing_state,
+        target,
+        sha256,
+        source_executable: canonical_source,
+        stable_executable: stable,
+    })
+}
+
+fn validate_plugin_distribution(
+    distribution_kind: &str,
+    signing_state: &str,
+    allow_unsigned_validation: bool,
+) -> Result<(), String> {
+    match (distribution_kind, signing_state) {
+        ("official", "platform-signed") => Ok(()),
+        ("validation", "unsigned-validation") if allow_unsigned_validation => Ok(()),
+        ("validation", "unsigned-validation") => Err(format!(
+            "PLUGIN_PACKAGE_UNSIGNED_VALIDATION_ONLY: set {ALLOW_UNSIGNED_PLUGIN_ENV}=1 only in an isolated release-validation environment"
+        )),
+        _ => Err(
+            "PLUGIN_RUNTIME_MANIFEST_INVALID: distributionKind and packageSigningState disagree"
+                .to_string(),
+        ),
+    }
+}
+
+fn plugin_self_test_runtime_bytes(bytes: &[u8], expected_sha256: &str) -> Result<(), String> {
+    if sha256_hex(bytes) != expected_sha256 {
+        return Err(
+            "PLUGIN_RUNTIME_CHECKSUM_MISMATCH: bundled runtime differs from the signed manifest"
+                .to_string(),
+        );
+    }
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|error| format!("PLUGIN_RUNTIME_SELF_TEST_FAILED: random staging: {error}"))?;
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let directory = env::temp_dir().join(format!("loomex-runtime-self-test-{suffix}"));
+    fs::create_dir(&directory)
+        .map_err(|error| format!("PLUGIN_RUNTIME_SELF_TEST_FAILED: create staging: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("PLUGIN_RUNTIME_SELF_TEST_FAILED: secure staging: {error}"))?;
+    }
+    let executable = directory.join(plugin_runtime_executable_name());
+    let result = (|| -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&executable)
+            .map_err(|error| format!("PLUGIN_RUNTIME_SELF_TEST_FAILED: stage runtime: {error}"))?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("PLUGIN_RUNTIME_SELF_TEST_FAILED: stage runtime: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).map_err(
+                |error| format!("PLUGIN_RUNTIME_SELF_TEST_FAILED: secure runtime: {error}"),
+            )?;
+        }
+        let status = Command::new(&executable)
+            .arg("--help")
+            .stdin(process::Stdio::null())
+            .stdout(process::Stdio::null())
+            .stderr(process::Stdio::null())
+            .status()
+            .map_err(|error| format!("PLUGIN_RUNTIME_SELF_TEST_FAILED: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "PLUGIN_RUNTIME_SELF_TEST_FAILED: bundled runtime exited with {status}"
+            ))
+        }
+    })();
+    let cleanup = fs::remove_dir_all(&directory)
+        .map_err(|error| format!("PLUGIN_RUNTIME_SELF_TEST_CLEANUP_FAILED: {error}"));
+    result.and(cleanup)
+}
+
+fn plugin_target_key() -> Result<String, String> {
+    let platform = match env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        _ => {
+            return Err(
+                "LOCAL_CONTROL_PLATFORM_UNSUPPORTED: plugin runtime supports macOS and Linux"
+                    .to_string(),
+            )
+        }
+    };
+    let arch = match env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        _ => {
+            return Err(format!(
+                "PLUGIN_RUNTIME_TARGET_UNAVAILABLE: {}/{}",
+                env::consts::OS,
+                env::consts::ARCH
+            ))
+        }
+    };
+    Ok(format!("{platform}-{arch}"))
+}
+
+fn plugin_runtime_executable_name() -> &'static str {
+    if cfg!(windows) {
+        "loomex.exe"
+    } else {
+        "loomex"
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PluginAuthFlow {
+    login_id: String,
+    profile: String,
+    server_url: String,
+    host_header: Option<String>,
+    challenge: DeviceLoginChallenge,
+    created_at_epoch_seconds: u64,
+}
+
+fn plugin_auth_status(options: &GlobalOptions) -> Result<Value, String> {
+    let config = load_cli_config()?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let runner_credential = store.load(&resolved.profile).map_err(format_core_error)?;
+    let user_credential = store
+        .load(&user_credential_profile(&resolved.profile))
+        .map_err(format_core_error)?;
+    let now = current_epoch_seconds()?;
+    let credential_status = |credential: Option<ManagementCredential>| match credential {
+        Some(credential) => {
+            match credential.validate_not_expiring(now, MANAGEMENT_TOKEN_CLOCK_SKEW_SECONDS) {
+                Ok(()) => (
+                    true,
+                    Some(credential.expires_at),
+                    credential.storage_warning,
+                ),
+                Err(error) => (
+                    false,
+                    Some(credential.expires_at),
+                    Some(format_core_error(error)),
+                ),
+            }
+        }
+        None => (false, None, None),
+    };
+    let runner_credential_present = runner_credential.is_some();
+    let runner_upgrade_reason = runner_credential
+        .as_ref()
+        .and_then(runner_credential_upgrade_reason);
+    let (mut runner_authenticated, runner_expires_at, runner_warning) =
+        credential_status(runner_credential);
+    if runner_upgrade_reason.is_some() {
+        runner_authenticated = false;
+    }
+    let (user_authenticated, user_expires_at, user_warning) = credential_status(user_credential);
+    let warning = runner_upgrade_reason
+        .map(|reason| format!("RUNNER_CREDENTIAL_UPGRADE_REQUIRED: {reason}"))
+        .or(runner_warning)
+        .or(user_warning);
+    Ok(json!({
+        "authenticated": runner_authenticated || user_authenticated,
+        "userAuthenticated": user_authenticated,
+        "runnerAuthenticated": runner_authenticated,
+        "runnerCredentialPresent": runner_credential_present,
+        "reauthRequired": runner_upgrade_reason.is_some(),
+        "upgradeRequired": runner_upgrade_reason.is_some(),
+        "reauthReason": runner_upgrade_reason,
+        "profile": resolved.profile,
+        "organizationId": resolved.organization_id,
+        "projectId": resolved.project_id,
+        "expiresAt": runner_expires_at.as_ref().or(user_expires_at.as_ref()),
+        "userExpiresAt": user_expires_at,
+        "runnerExpiresAt": runner_expires_at,
+        "warning": warning,
+    }))
+}
+
+fn plugin_auth_start(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
+    let config = load_cli_config()?;
+    let mut overrides = options.config_overrides();
+    if let Some(server_url) = params.get("serverUrl").and_then(Value::as_str) {
+        overrides.server_url = Some(server_url.to_string());
+    }
+    let resolved = config
+        .resolve(overrides, |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    if store
+        .load(&resolved.profile)
+        .map_err(format_core_error)?
+        .is_some()
+        || store
+            .load(&user_credential_profile(&resolved.profile))
+            .map_err(format_core_error)?
+            .is_some()
+    {
+        return Err(
+            "AUTH_LOGOUT_REQUIRED: logout before starting a new device authorization".to_string(),
+        );
+    }
+    let mut client =
+        HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())
+            .map_err(format_core_error)?;
+    let challenge = client.start_device_login().map_err(format_core_error)?;
+    let flow = allocate_plugin_auth_flow(PluginAuthFlow {
+        login_id: String::new(),
+        profile: resolved.profile,
+        server_url: resolved.server_url,
+        host_header: resolved.host_header,
+        challenge: challenge.clone(),
+        created_at_epoch_seconds: current_epoch_seconds()?,
+    })?;
+    Ok(json!({
+        "loginId": flow.login_id,
+        "verificationUri": challenge.verification_uri,
+        "userCode": challenge.user_code,
+        "expiresInSeconds": challenge.expires_in_seconds,
+        "intervalSeconds": challenge.interval_seconds,
+    }))
+}
+
+fn plugin_auth_wait(params: &Value, _options: &GlobalOptions) -> Result<Value, String> {
+    let login_id = plugin_required_string(params, "loginId")?;
+    let flow = read_plugin_auth_flow(login_id)?;
+    let now = current_epoch_seconds()?;
+    if now
+        > flow
+            .created_at_epoch_seconds
+            .saturating_add(flow.challenge.expires_in_seconds)
+    {
+        remove_plugin_auth_flow(login_id)?;
+        return Err("AUTH_DEVICE_FLOW_EXPIRED: start authentication again".to_string());
+    }
+    let requested_timeout = params
+        .get("timeoutSeconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(30)
+        .clamp(1, 45);
+    let remaining = flow
+        .created_at_epoch_seconds
+        .saturating_add(flow.challenge.expires_in_seconds)
+        .saturating_sub(now);
+    let timeout_seconds = requested_timeout.min(remaining.max(1));
+    let mut client = HttpManagementApiClient::new(&flow.server_url, flow.host_header.clone())
+        .map_err(format_core_error)?;
+    let token = match poll_device_login(
+        &mut client,
+        &flow.challenge.device_code,
+        flow.challenge.interval_seconds,
+        timeout_seconds,
+    ) {
+        Ok(token) => token,
+        Err(error) if error.starts_with("LOGIN_DEVICE_TIMEOUT:") => {
+            return Ok(json!({
+                "authenticated": false,
+                "pending": true,
+                "loginId": login_id,
+            }));
+        }
+        Err(error) => return Err(error),
+    };
+    let config_path = cli_config_path();
+    let store = SystemCredentialStore::new(credential_dir());
+    let result = complete_plugin_auth_flow(&flow, token, &config_path, &store)?;
+    remove_plugin_auth_flow(login_id)?;
+    Ok(result)
+}
+
+fn complete_plugin_auth_flow<S: CredentialStore + ?Sized>(
+    flow: &PluginAuthFlow,
+    token: AuthTokenResponse,
+    config_path: &Path,
+    store: &S,
+) -> Result<Value, String> {
+    let mut config = load_cli_config_from(config_path)?;
+    let configured_org = config
+        .profiles
+        .get(&flow.profile)
+        .and_then(|profile| profile.organization_id.clone())
+        .unwrap_or_default();
+    let credential_profile = user_credential_profile(&flow.profile);
+    let credential = ManagementCredential::from_user_token_response(
+        &credential_profile,
+        configured_org.clone(),
+        token,
+        CredentialStorageBackend::LocalFileFallback,
+    )
+    .map_err(format_core_error)?;
+    let storage = store.save(&credential).map_err(format_core_error)?;
+    config
+        .set_key(
+            &format!("profiles.{}.serverUrl", flow.profile),
+            flow.server_url.clone(),
+        )
+        .map_err(format_core_error)?;
+    if let Err(error) = config.save(config_path) {
+        let _ = store.delete(&credential_profile);
+        return Err(format_core_error(error));
+    }
+    Ok(json!({
+        "authenticated": true,
+        "userAuthenticated": true,
+        "runnerAuthenticated": false,
+        "pending": false,
+        "profile": flow.profile,
+        "serverUrl": flow.server_url,
+        "organizationId": configured_org,
+        "organizationSelectionRequired": configured_org.is_empty(),
+        "expiresAt": credential.expires_at,
+        "storageBackend": storage_backend_name(storage.backend),
+        "storageWarning": storage.warning,
+    }))
+}
+
+fn plugin_auth_flow_dir() -> Result<PathBuf, String> {
+    Ok(RuntimeInstaller::for_current_user()
+        .map_err(format_core_error)?
+        .layout()
+        .root
+        .join("auth-flows"))
+}
+
+fn plugin_auth_flow_path(login_id: &str) -> Result<PathBuf, String> {
+    if login_id.is_empty()
+        || !login_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("AUTH_LOGIN_ID_INVALID: loginId is invalid".to_string());
+    }
+    Ok(plugin_auth_flow_dir()?.join(format!("{login_id}.json")))
+}
+
+fn allocate_plugin_auth_flow(mut flow: PluginAuthFlow) -> Result<PluginAuthFlow, String> {
+    let directory = plugin_auth_flow_dir()?;
+    allocate_plugin_auth_flow_in(&directory, &mut flow)
+}
+
+fn allocate_plugin_auth_flow_in(
+    directory: &Path,
+    flow: &mut PluginAuthFlow,
+) -> Result<PluginAuthFlow, String> {
+    fs::create_dir_all(directory).map_err(|err| format!("AUTH_FLOW_WRITE_FAILED: {err}"))?;
+    set_cli_private_dir(directory)?;
+    for _attempt in 0..16 {
+        flow.login_id = random_plugin_login_id()?;
+        if try_create_plugin_auth_flow_file(directory, flow)? {
+            return Ok(flow.clone());
+        }
+    }
+    Err("AUTH_FLOW_ID_ALLOCATION_FAILED: could not allocate a unique loginId".to_string())
+}
+
+fn random_plugin_login_id() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|err| format!("AUTH_FLOW_RANDOM_FAILED: {err}"))?;
+    Ok(format!(
+        "login-{}",
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+fn try_create_plugin_auth_flow_file(
+    directory: &Path,
+    flow: &PluginAuthFlow,
+) -> Result<bool, String> {
+    let path = directory.join(format!("{}.json", flow.login_id));
+    let payload = serde_json::to_vec(&json!({
+        "loginId": flow.login_id,
+        "profile": flow.profile,
+        "serverUrl": flow.server_url,
+        "hostHeader": flow.host_header,
+        "challenge": flow.challenge,
+        "createdAtEpochSeconds": flow.created_at_epoch_seconds,
+    }))
+    .map_err(|err| format!("AUTH_FLOW_WRITE_FAILED: {err}"))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(format!("AUTH_FLOW_WRITE_FAILED: {error}")),
+    };
+    if let Err(error) = file
+        .write_all(&payload)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("AUTH_FLOW_WRITE_FAILED: {error}"))
+    {
+        let _ = fs::remove_file(&path);
+        return Err(error);
+    }
+    set_cli_private_file(&path)?;
+    Ok(true)
+}
+
+fn read_plugin_auth_flow(login_id: &str) -> Result<PluginAuthFlow, String> {
+    let path = plugin_auth_flow_path(login_id)?;
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|err| format!("AUTH_FLOW_NOT_FOUND: {err}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("AUTH_FLOW_PATH_UNSAFE: flow state must be a regular file".to_string());
+    }
+    validate_cli_private_file(&metadata)?;
+    let value: Value = serde_json::from_slice(
+        &fs::read(path).map_err(|err| format!("AUTH_FLOW_READ_FAILED: {err}"))?,
+    )
+    .map_err(|err| format!("AUTH_FLOW_INVALID: {err}"))?;
+    let required = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("AUTH_FLOW_INVALID: {key} is required"))
+    };
+    Ok(PluginAuthFlow {
+        login_id: required("loginId")?,
+        profile: required("profile")?,
+        server_url: required("serverUrl")?,
+        host_header: value
+            .get("hostHeader")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        challenge: serde_json::from_value(
+            value
+                .get("challenge")
+                .cloned()
+                .ok_or_else(|| "AUTH_FLOW_INVALID: challenge is required".to_string())?,
+        )
+        .map_err(|err| format!("AUTH_FLOW_INVALID: {err}"))?,
+        created_at_epoch_seconds: value
+            .get("createdAtEpochSeconds")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "AUTH_FLOW_INVALID: createdAtEpochSeconds is required".to_string())?,
+    })
+}
+
+fn remove_plugin_auth_flow(login_id: &str) -> Result<(), String> {
+    let path = plugin_auth_flow_path(login_id)?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("AUTH_FLOW_REMOVE_FAILED: {error}")),
+    }
+}
+
+#[cfg(unix)]
+fn set_cli_private_dir(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|err| format!("AUTH_FLOW_PERMISSIONS_FAILED: {err}"))
+}
+
+#[cfg(not(unix))]
+fn set_cli_private_dir(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_cli_private_file(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|err| format!("AUTH_FLOW_PERMISSIONS_FAILED: {err}"))
+}
+
+#[cfg(not(unix))]
+fn set_cli_private_file(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_cli_private_file(metadata: &fs::Metadata) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(
+            "AUTH_FLOW_PERMISSIONS_UNSAFE: flow state must be private to this user".to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_cli_private_file(_metadata: &fs::Metadata) -> Result<(), String> {
+    Ok(())
+}
+
+fn plugin_runner_control(params: &Value) -> Result<Value, String> {
+    plugin_confirmed(params)?;
+    if !cfg!(unix) {
+        return Err("LOCAL_CONTROL_PLATFORM_UNSUPPORTED: runner service control currently requires macOS or Linux".to_string());
+    }
+    let action = plugin_required_string(params, "action")?;
+    if !matches!(action, "start" | "stop" | "restart") {
+        return Err(
+            "RUNNER_CONTROL_ACTION_INVALID: action must be start, stop, or restart".to_string(),
+        );
+    }
+    if action != "stop" {
+        let readiness = plugin_service_bootstrap_readiness(&GlobalOptions::default())?;
+        if readiness.get("ready").and_then(Value::as_bool) != Some(true) {
+            return Err(format!(
+                "RUNNER_SERVICE_BOOTSTRAP_REQUIRED: {}",
+                readiness
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("authenticate and create a workspace binding first")
+            ));
+        }
+    }
+    let options = RunnerServiceOptions::parse(&[], &GlobalOptions::default())?;
+    let service_status = parse_json_output(run_runner_service_status(
+        &[],
+        &GlobalOptions {
+            json: true,
+            ..Default::default()
+        },
+    )?)?;
+    let active = service_status
+        .get("active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let commands = plugin_service_control_commands(&options, action, active)?;
+    let mut runner = OsServiceCommandRunner;
+    let mut results = Vec::new();
+    for command in &commands {
+        let output = runner.run(command)?;
+        results.push(json!({
+            "program": command.program,
+            "args": command.args,
+            "success": output.success,
+            "stdout": output.stdout,
+            "stderr": output.stderr,
+        }));
+    }
+    let health = if action == "stop" {
+        plugin_invalidate_local_control_files()?;
+        json!({"healthy": false, "status": "stopped"})
+    } else {
+        plugin_wait_for_local_control_health(20, Duration::from_millis(250))?
+    };
+    Ok(json!({
+        "action": action,
+        "success": true,
+        "results": results,
+        "health": health,
+    }))
+}
+
+fn plugin_service_control_commands(
+    options: &RunnerServiceOptions,
+    action: &str,
+    active: bool,
+) -> Result<Vec<ServiceCommand>, String> {
+    if action == "stop" && !active {
+        return Ok(Vec::new());
+    }
+    match options.platform {
+        RunnerServicePlatform::MacOsLaunchAgent => {
+            let domain = launchctl_user_domain();
+            let path = default_service_install_path(options)?;
+            match action {
+                "start" if active => Ok(vec![ServiceCommand {
+                    program: "launchctl".to_string(),
+                    args: vec![
+                        "kickstart".to_string(),
+                        "-k".to_string(),
+                        format!("{domain}/{}", options.service_name),
+                    ],
+                }]),
+                "start" => Ok(vec![
+                    ServiceCommand {
+                        program: "launchctl".to_string(),
+                        args: vec![
+                            "bootstrap".to_string(),
+                            domain.clone(),
+                            path.display().to_string(),
+                        ],
+                    },
+                    ServiceCommand {
+                        program: "launchctl".to_string(),
+                        args: vec![
+                            "kickstart".to_string(),
+                            "-k".to_string(),
+                            format!("{domain}/{}", options.service_name),
+                        ],
+                    },
+                ]),
+                "stop" => Ok(vec![ServiceCommand {
+                    program: "launchctl".to_string(),
+                    args: vec![
+                        "bootout".to_string(),
+                        format!("{domain}/{}", options.service_name),
+                    ],
+                }]),
+                "restart" if active => Ok(vec![ServiceCommand {
+                    program: "launchctl".to_string(),
+                    args: vec![
+                        "kickstart".to_string(),
+                        "-k".to_string(),
+                        format!("{domain}/{}", options.service_name),
+                    ],
+                }]),
+                "restart" => plugin_service_control_commands(options, "start", false),
+                _ => Err("RUNNER_CONTROL_ACTION_INVALID: unsupported action".to_string()),
+            }
+        }
+        RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => {
+            let unit = format!("{}.service", options.service_name);
+            match action {
+                "start" => Ok(vec![systemctl_command(
+                    options.platform,
+                    &["enable", "--now", &unit],
+                )]),
+                "restart" if !active => plugin_service_control_commands(options, "start", false),
+                "restart" | "stop" => {
+                    Ok(vec![systemctl_command(options.platform, &[action, &unit])])
+                }
+                _ => Err("RUNNER_CONTROL_ACTION_INVALID: unsupported action".to_string()),
+            }
+        }
+    }
+}
+
+fn plugin_stop_service_and_invalidate_local_control(
+    options: &GlobalOptions,
+) -> Result<Value, String> {
+    let service = parse_json_output(run_runner_service_status(&[], options)?)?;
+    let active = service
+        .get("active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !active && plugin_local_control_ping_once().is_ok() {
+        return Err(
+            "RUNNER_SERVICE_UNMANAGED_ACTIVE: a healthy local daemon is not owned by the configured service; stop it before changing identity or binding"
+                .to_string(),
+        );
+    }
+    let control = if active {
+        Some(plugin_runner_control(&json!({
+            "action": "stop",
+            "confirm": true,
+        }))?)
+    } else {
+        plugin_invalidate_local_control_files()?;
+        None
+    };
+    Ok(json!({
+        "runnerStopped": active,
+        "localControlInvalidated": true,
+        "control": control,
+    }))
+}
+
+fn plugin_revoke_remote_runner_token(options: &GlobalOptions) -> Result<Value, String> {
+    let config = load_cli_config()?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let Some(credential) = store.load(&resolved.profile).map_err(format_core_error)? else {
+        return Ok(json!({"revoked": false, "reason": "runner token is not present"}));
+    };
+    let mut client = HttpManagementApiClient::new(&resolved.server_url, resolved.host_header)
+        .map_err(format_core_error)?;
+    client
+        .revoke_current_runner_token(&credential)
+        .map_err(format_core_error)
+}
+
+fn plugin_remote_revocation_outcome(result: Result<Value, String>) -> Value {
+    match result {
+        Ok(value) => value,
+        Err(error) => json!({
+            "revoked": false,
+            "retryRequired": true,
+            "warning": error,
+        }),
+    }
+}
+
+fn plugin_finalize_logout_result(
+    mut result: Value,
+    lifecycle: Value,
+    remote_revocation: Value,
+) -> Value {
+    if let Some(object) = result.as_object_mut() {
+        object.insert("serverRevokeAttempted".to_string(), json!(true));
+        object.insert(
+            "serverRevokeSucceeded".to_string(),
+            json!(remote_revocation.get("revoked").and_then(Value::as_bool) == Some(true)),
+        );
+        object.insert("remoteTokenRevocation".to_string(), remote_revocation);
+    }
+    plugin_result_with_lifecycle(result, lifecycle)
+}
+
+fn plugin_transition_failure(error: String, options: &GlobalOptions) -> String {
+    let recovery = plugin_activate_installed_service_after_bootstrap(options)
+        .unwrap_or_else(|recovery_error| json!({"recovered": false, "error": recovery_error}));
+    format!(
+        "PLUGIN_CONTEXT_TRANSITION_FAILED: {error}; serviceRecovery={}",
+        serde_json::to_string(&recovery).unwrap_or_else(|_| "unavailable".to_string())
+    )
+}
+
+fn plugin_invalidate_local_control_files() -> Result<(), String> {
+    let paths = LocalControlPaths::from_environment().map_err(format_core_error)?;
+    plugin_invalidate_local_control_files_at(&paths)
+}
+
+fn plugin_invalidate_local_control_files_at(paths: &LocalControlPaths) -> Result<(), String> {
+    for path in [&paths.socket_path, &paths.token_path] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "LOCAL_CONTROL_INVALIDATION_FAILED: {}: {error}",
+                    path.display()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn plugin_runner_status(options: &GlobalOptions) -> Result<Value, String> {
+    let setup = plugin_setup_status(options)?;
+    let auth = plugin_auth_status(options)?;
+    let service_active = setup
+        .pointer("/service/active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let health = if service_active {
+        plugin_local_control_ping_once().unwrap_or_else(
+            |error| json!({"healthy": false, "status": "unavailable", "error": error}),
+        )
+    } else {
+        json!({"healthy": false, "status": "inactive"})
+    };
+    Ok(plugin_runner_status_value(setup, auth, health))
+}
+
+fn plugin_runner_status_value(setup: Value, auth: Value, health: Value) -> Value {
+    let service_active = setup
+        .pointer("/service/active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    json!({
+        "running": service_active && health.get("healthy").and_then(Value::as_bool) == Some(true),
+        "installed": setup.get("installed").and_then(Value::as_bool).unwrap_or(false),
+        "runtimeVersion": setup.pointer("/runtime/version"),
+        "runtime": setup.get("runtime"),
+        "service": setup.get("service"),
+        "auth": auth,
+        "health": health,
+        "connection": {
+            "available": service_active,
+            "status": if service_active { "service_active" } else { "service_inactive" },
+        },
+        "queue": {
+            "available": false,
+            "depth": null,
+            "reason": "queue telemetry is not exposed by runner-control",
+        },
+        "activeExecutions": {
+            "available": false,
+            "count": null,
+            "items": [],
+            "reason": "active execution telemetry is not exposed by runner-control",
+        },
+        "updateHealth": {
+            "available": false,
+            "status": "unknown",
+            "reason": "update telemetry is not exposed by runner-control",
+        },
+    })
+}
+
+fn plugin_service_bootstrap_readiness(options: &GlobalOptions) -> Result<Value, String> {
+    let config = load_cli_config()?;
+    let resolved = config
+        .resolve(options.config_overrides(), |key| env::var(key).ok())
+        .map_err(format_core_error)?;
+    let store = SystemCredentialStore::new(credential_dir());
+    let now = current_epoch_seconds()?;
+    let runner_credential = store.load(&resolved.profile).map_err(format_core_error)?;
+    let (credential_ready, reauth_reason) =
+        runner_credential_local_readiness(runner_credential.as_ref(), now);
+    let missing_context = [
+        ("organizationId", resolved.organization_id.as_deref()),
+        ("projectId", resolved.project_id.as_deref()),
+        ("runnerId", resolved.runner_id.as_deref()),
+        ("bindingId", resolved.binding_id.as_deref()),
+        ("workspacePath", resolved.workspace_path.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| {
+        value
+            .filter(|value| !value.trim().is_empty())
+            .is_none()
+            .then_some(name)
+    })
+    .collect::<Vec<_>>();
+    let workspace_ready = resolved
+        .workspace_path
+        .as_deref()
+        .is_some_and(|path| validate_workspace_path(path).is_ok());
+    let ready = credential_ready && missing_context.is_empty() && workspace_ready;
+    let reason = if let Some(reason) = reauth_reason {
+        reason
+    } else if !credential_ready {
+        "runner authentication is not established"
+    } else if !missing_context.is_empty() {
+        "organization, project, runner, binding, and workspace must be selected"
+    } else if !workspace_ready {
+        "selected workspace is not currently readable and writable"
+    } else {
+        "bootstrap is complete"
+    };
+    Ok(json!({
+        "ready": ready,
+        "authenticated": credential_ready,
+        "reauthRequired": reauth_reason.is_some(),
+        "upgradeRequired": reauth_reason.is_some(),
+        "reauthReason": reauth_reason,
+        "missingContext": missing_context,
+        "workspaceReady": workspace_ready,
+        "reason": reason,
+    }))
+}
+
+fn plugin_activate_installed_service_after_bootstrap(
+    options: &GlobalOptions,
+) -> Result<Value, String> {
+    let service = parse_json_output(run_runner_service_status(&[], options)?)?;
+    if service.get("installed").and_then(Value::as_bool) != Some(true) {
+        return Ok(json!({
+            "attempted": false,
+            "healthy": false,
+            "status": "not_installed",
+        }));
+    }
+    let readiness = plugin_service_bootstrap_readiness(options)?;
+    if readiness.get("ready").and_then(Value::as_bool) != Some(true) {
+        return Ok(json!({
+            "attempted": false,
+            "healthy": false,
+            "status": "waiting_for_bootstrap",
+            "readiness": readiness,
+        }));
+    }
+    let action = if service.get("active").and_then(Value::as_bool) == Some(true) {
+        "restart"
+    } else {
+        "start"
+    };
+    let control = plugin_runner_control(&json!({"action": action, "confirm": true}))?;
+    Ok(json!({
+        "attempted": true,
+        "healthy": control
+            .pointer("/health/healthy")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "status": "activated",
+        "action": action,
+        "control": control,
+    }))
+}
+
+fn plugin_wait_for_local_control_health(
+    attempts: usize,
+    retry_delay: Duration,
+) -> Result<Value, String> {
+    let mut last_error = "local control service did not become ready".to_string();
+    for attempt in 1..=attempts.max(1) {
+        match plugin_local_control_ping_once() {
+            Ok(mut health) => {
+                if let Some(object) = health.as_object_mut() {
+                    object.insert("attempts".to_string(), json!(attempt));
+                }
+                return Ok(health);
+            }
+            Err(error) => last_error = error,
+        }
+        if attempt < attempts {
+            thread::sleep(retry_delay);
+        }
+    }
+    Err(format!("RUNNER_SERVICE_HEALTHCHECK_FAILED: {last_error}"))
+}
+
+#[cfg(unix)]
+fn plugin_local_control_ping_once() -> Result<Value, String> {
+    let paths = LocalControlPaths::from_environment().map_err(format_core_error)?;
+    plugin_local_control_ping_once_at(&paths)
+}
+
+#[cfg(unix)]
+fn plugin_local_control_ping_once_at(paths: &LocalControlPaths) -> Result<Value, String> {
+    use std::os::unix::net::UnixStream;
+
+    let token = read_local_control_token(paths).map_err(format_core_error)?;
+    let mut stream = UnixStream::connect(&paths.socket_path)
+        .map_err(|error| format!("LOCAL_CONTROL_CONNECT_FAILED: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(1))))
+        .map_err(|error| format!("LOCAL_CONTROL_TIMEOUT_FAILED: {error}"))?;
+    let request_id = format!("health-{}", std::process::id());
+    let request = LocalControlRequest {
+        protocol_version: LOCAL_CONTROL_PROTOCOL_VERSION.to_string(),
+        id: request_id.clone(),
+        auth_token: token,
+        method: "ping".to_string(),
+        params: json!({}),
+    };
+    serde_json::to_writer(&mut stream, &request)
+        .map_err(|error| format!("LOCAL_CONTROL_REQUEST_FAILED: {error}"))?;
+    stream
+        .write_all(b"\n")
+        .and_then(|_| stream.flush())
+        .map_err(|error| format!("LOCAL_CONTROL_REQUEST_FAILED: {error}"))?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(|error| format!("LOCAL_CONTROL_RESPONSE_FAILED: {error}"))?;
+    let response: LocalControlResponse = serde_json::from_str(&line)
+        .map_err(|error| format!("LOCAL_CONTROL_RESPONSE_INVALID: {error}"))?;
+    if response.protocol_version != LOCAL_CONTROL_PROTOCOL_VERSION
+        || response.id != request_id
+        || !response.ok
+        || response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("pong"))
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err("LOCAL_CONTROL_HEALTHCHECK_INVALID: ping response was not healthy".to_string());
+    }
+    Ok(json!({
+        "healthy": true,
+        "status": "ok",
+        "protocolVersion": LOCAL_CONTROL_PROTOCOL_VERSION,
+    }))
+}
+
+#[cfg(not(unix))]
+fn plugin_local_control_ping_once() -> Result<Value, String> {
+    Err("LOCAL_CONTROL_PLATFORM_UNSUPPORTED: health check requires macOS or Linux".to_string())
 }
 
 fn run_runner_ops(args: &[String], options: &GlobalOptions) -> Result<String, String> {
@@ -2008,6 +4926,7 @@ struct RunnerServiceOptions {
     uninstall_output_path: Option<PathBuf>,
     dry_run: bool,
     once: bool,
+    defer_start: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2054,6 +4973,160 @@ impl ServiceCommandRunner for OsServiceCommandRunner {
                 }
             ))
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StrictServiceState {
+    installed: bool,
+    enabled: bool,
+    active: bool,
+}
+
+trait TransactionServiceStatusProbe {
+    fn probe(&mut self, options: &RunnerServiceOptions) -> Result<StrictServiceState, String>;
+}
+
+struct OsTransactionServiceStatusProbe;
+
+impl TransactionServiceStatusProbe for OsTransactionServiceStatusProbe {
+    fn probe(&mut self, options: &RunnerServiceOptions) -> Result<StrictServiceState, String> {
+        let path = default_service_install_path(options)?;
+        let file_installed = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(format!(
+                    "PLUGIN_SETUP_SERVICE_PROBE_UNSAFE: {} is not a regular service file",
+                    path.display()
+                ));
+            }
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(format!("PLUGIN_SETUP_SERVICE_PROBE_FAILED: {error}"));
+            }
+        };
+        match options.platform {
+            RunnerServicePlatform::MacOsLaunchAgent => {
+                let command = ServiceCommand {
+                    program: "launchctl".to_string(),
+                    args: vec![
+                        "print".to_string(),
+                        format!("{}/{}", launchctl_user_domain(), options.service_name),
+                    ],
+                };
+                let active = strict_probe_command(&command, StrictProbeKind::LaunchctlLoaded)?;
+                Ok(StrictServiceState {
+                    installed: file_installed || active,
+                    enabled: file_installed || active,
+                    active,
+                })
+            }
+            RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => {
+                let unit = format!("{}.service", options.service_name);
+                let active = strict_probe_command(
+                    &systemctl_command(options.platform, &["is-active", &unit]),
+                    StrictProbeKind::SystemdActive,
+                )?;
+                let enabled = strict_probe_command(
+                    &systemctl_command(options.platform, &["is-enabled", &unit]),
+                    StrictProbeKind::SystemdEnabled,
+                )?;
+                Ok(StrictServiceState {
+                    installed: file_installed || active || enabled,
+                    enabled,
+                    active,
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StrictProbeKind {
+    LaunchctlLoaded,
+    SystemdActive,
+    SystemdEnabled,
+}
+
+fn strict_probe_command(command: &ServiceCommand, kind: StrictProbeKind) -> Result<bool, String> {
+    let output = Command::new(&command.program)
+        .args(&command.args)
+        .output()
+        .map_err(|error| format!("PLUGIN_SETUP_SERVICE_PROBE_FAILED: {error}"))?;
+    let code = output.status.code();
+    let stdout = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_ascii_lowercase();
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .to_ascii_lowercase();
+    classify_strict_probe_output(output.status.success(), code, &stdout, &stderr, kind).map_err(
+        |detail| {
+            format!(
+                "PLUGIN_SETUP_SERVICE_PROBE_FAILED: {} {} exited {:?}: {detail}",
+                command.program,
+                command.args.join(" "),
+                code,
+            )
+        },
+    )
+}
+
+fn classify_strict_probe_output(
+    success: bool,
+    code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    kind: StrictProbeKind,
+) -> Result<bool, String> {
+    match kind {
+        StrictProbeKind::LaunchctlLoaded if success => Ok(true),
+        StrictProbeKind::LaunchctlLoaded
+            if code == Some(113)
+                || stderr.contains("could not find service")
+                || stderr.contains("service not found") =>
+        {
+            Ok(false)
+        }
+        StrictProbeKind::SystemdActive
+            if success && matches!(stdout, "active" | "activating" | "reloading") =>
+        {
+            Ok(true)
+        }
+        StrictProbeKind::SystemdActive
+            if code == Some(3) && matches!(stdout, "inactive" | "failed" | "deactivating")
+                || code == Some(4) && stdout == "unknown" =>
+        {
+            Ok(false)
+        }
+        StrictProbeKind::SystemdEnabled
+            if success
+                && matches!(
+                    stdout,
+                    "enabled" | "enabled-runtime" | "linked" | "linked-runtime" | "alias"
+                ) =>
+        {
+            Ok(true)
+        }
+        StrictProbeKind::SystemdEnabled
+            if (success || code == Some(1))
+                && matches!(
+                    stdout,
+                    "disabled" | "static" | "indirect" | "masked" | "generated" | "transient"
+                )
+                || code == Some(4) && matches!(stdout, "not-found" | "unknown") =>
+        {
+            Ok(false)
+        }
+        _ => Err(if stderr.is_empty() {
+            if stdout.is_empty() {
+                "service manager returned no diagnostic".to_string()
+            } else {
+                stdout.to_string()
+            }
+        } else {
+            stderr.to_string()
+        }),
     }
 }
 
@@ -2104,7 +5177,7 @@ impl RunnerServiceRuntimeLauncher for DefaultRunnerServiceRuntimeLauncher {
 impl RunnerServiceOptions {
     fn parse(args: &[String], options: &GlobalOptions) -> Result<Self, String> {
         let mut service_options = Self {
-            platform: RunnerServicePlatform::current(),
+            platform: RunnerServicePlatform::current().map_err(format_core_error)?,
             service_name: "loomex-runner".to_string(),
             binary_path: env::current_exe().unwrap_or_else(|_| PathBuf::from("loomex")),
             config_path: cli_config_path(),
@@ -2114,6 +5187,7 @@ impl RunnerServiceOptions {
             uninstall_output_path: None,
             dry_run: false,
             once: false,
+            defer_start: false,
         };
         let mut index = 0;
         while index < args.len() {
@@ -2162,6 +5236,7 @@ impl RunnerServiceOptions {
                 }
                 "--dry-run" => service_options.dry_run = true,
                 "--once" => service_options.once = true,
+                "--defer-start" => service_options.defer_start = true,
                 value => return Err(format!("unknown runner service option: {value}")),
             }
             index += 1;
@@ -2200,6 +5275,15 @@ fn run_runner_service_install_with_runner(
     options: &GlobalOptions,
     runner: &mut dyn ServiceCommandRunner,
 ) -> Result<String, String> {
+    run_runner_service_install_with_runner_and_path(args, options, runner, None)
+}
+
+fn run_runner_service_install_with_runner_and_path(
+    args: &[String],
+    options: &GlobalOptions,
+    runner: &mut dyn ServiceCommandRunner,
+    default_install_path_override: Option<&Path>,
+) -> Result<String, String> {
     let service_options = RunnerServiceOptions::parse(args, options)?;
     let manifest = service_options
         .spec()
@@ -2209,6 +5293,8 @@ fn run_runner_service_install_with_runner(
     let artifact_only = service_install_is_artifact_only(&service_options);
     let commands = if artifact_only {
         Vec::new()
+    } else if service_options.defer_start {
+        service_deferred_install_commands(&service_options)?
     } else {
         service_install_commands(&service_options)?
     };
@@ -2219,9 +5305,14 @@ fn run_runner_service_install_with_runner(
             written.push(path.display().to_string());
         } else if matches!(
             service_options.platform,
-            RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd
+            RunnerServicePlatform::MacOsLaunchAgent
+                | RunnerServicePlatform::LinuxUserSystemd
+                | RunnerServicePlatform::LinuxSystemSystemd
         ) {
-            let path = default_service_install_path(&service_options)?;
+            let path = default_install_path_override
+                .map(Path::to_path_buf)
+                .map(Ok)
+                .unwrap_or_else(|| default_service_install_path(&service_options))?;
             write_service_file(&path, &manifest.content)?;
             written.push(path.display().to_string());
         }
@@ -2243,6 +5334,7 @@ fn run_runner_service_install_with_runner(
             "serviceName": service_options.service_name,
             "dryRun": service_options.dry_run,
             "artifactOnly": artifact_only,
+            "deferredStart": service_options.defer_start,
             "installPath": manifest.install_path,
             "written": written,
             "commands": command_plan,
@@ -2287,7 +5379,9 @@ fn run_runner_service_uninstall_with_runner(
         }
         if matches!(
             service_options.platform,
-            RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd
+            RunnerServicePlatform::MacOsLaunchAgent
+                | RunnerServicePlatform::LinuxUserSystemd
+                | RunnerServicePlatform::LinuxSystemSystemd
         ) {
             let path = default_service_install_path(&service_options)?;
             if path.exists() {
@@ -2359,19 +5453,34 @@ fn run_runner_service_status_with_runner(
             }
         }
     }
-    let installed = if service_options.dry_run {
-        unit_path.as_ref().is_some_and(|path| path.exists())
-    } else {
-        command_results
-            .iter()
-            .any(|result| result.get("success").and_then(Value::as_bool) == Some(true))
+    let active = !service_options.dry_run
+        && command_results
+            .first()
+            .and_then(|result| result.get("success"))
+            .and_then(Value::as_bool)
+            == Some(true);
+    let enabled = match service_options.platform {
+        RunnerServicePlatform::MacOsLaunchAgent => {
+            unit_path.as_ref().is_some_and(|path| path.exists()) || active
+        }
+        RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => {
+            !service_options.dry_run
+                && command_results
+                    .get(1)
+                    .and_then(|result| result.get("success"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }
     };
+    let installed = unit_path.as_ref().is_some_and(|path| path.exists()) || active || enabled;
     if options.json {
         return Ok(json!({
             "schemaVersion": "loomex.cli.runnerServiceStatus/v1",
             "platform": service_options.platform.as_str(),
             "serviceName": service_options.service_name,
             "installed": installed,
+            "active": active,
+            "enabled": enabled,
             "path": unit_path,
             "commands": command_plan,
             "results": command_results
@@ -2394,7 +5503,10 @@ fn run_runner_service_status_with_runner(
 fn run_runner_service_run(args: &[String], options: &GlobalOptions) -> Result<String, String> {
     let store = SystemCredentialStore::new(credential_dir());
     let mut launcher = DefaultRunnerServiceRuntimeLauncher;
-    let service_options = RunnerServiceOptions::parse(args, options)?;
+    let mut service_options = RunnerServiceOptions::parse(args, options)?;
+    if service_options.log_path.is_none() {
+        service_options.log_path = Some(default_log_path());
+    }
     let config = load_cli_config_from(&service_options.config_path)?;
     let resolved = config
         .resolve(
@@ -2409,6 +5521,15 @@ fn run_runner_service_run(args: &[String], options: &GlobalOptions) -> Result<St
     let mut client =
         HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())
             .map_err(format_core_error)?;
+    if !service_options.once {
+        let credential = load_credential(&store, &resolved.profile)?;
+        start_local_control_server(
+            client.clone(),
+            credential,
+            &resolved,
+            service_options.log_path.clone(),
+        )?;
+    }
     run_runner_service_run_parsed(
         service_options,
         options,
@@ -2417,6 +5538,46 @@ fn run_runner_service_run(args: &[String], options: &GlobalOptions) -> Result<St
         &mut client,
         &mut launcher,
     )
+}
+
+#[cfg(unix)]
+fn start_local_control_server(
+    client: HttpManagementApiClient,
+    credential: ManagementCredential,
+    resolved: &loomex_core::ResolvedCliSettings,
+    log_path: Option<PathBuf>,
+) -> Result<(), String> {
+    let paths = LocalControlPaths::from_environment().map_err(format_core_error)?;
+    let dispatcher = LocalControlDispatcher::new(client, credential).with_context(
+        resolved.project_id.clone(),
+        resolved.runner_id.clone(),
+        resolved.binding_id.clone(),
+        resolved.workspace_path.clone(),
+        log_path.or_else(|| env::var_os(LOG_PATH_ENV).map(PathBuf::from)),
+    );
+    let server = UnixLocalControlServer::bind(paths, dispatcher).map_err(format_core_error)?;
+    thread::Builder::new()
+        .name("loomex-local-control".to_string())
+        .spawn(move || {
+            if let Err(err) = server.serve() {
+                eprintln!(
+                    "local control service stopped: {}: {}",
+                    err.code, err.message
+                );
+            }
+        })
+        .map_err(|err| format!("LOCAL_CONTROL_THREAD_FAILED: {err}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn start_local_control_server(
+    _client: HttpManagementApiClient,
+    _credential: ManagementCredential,
+    _resolved: &loomex_core::ResolvedCliSettings,
+    _log_path: Option<PathBuf>,
+) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2443,17 +5604,27 @@ fn run_runner_service_run_with<C: ManagementApiClient>(
 }
 
 fn run_runner_service_run_parsed<C: ManagementApiClient>(
-    service_options: RunnerServiceOptions,
+    mut service_options: RunnerServiceOptions,
     options: &GlobalOptions,
     resolved: &loomex_core::ResolvedCliSettings,
     store: &dyn CredentialStore,
     client: &mut C,
     _launcher: &mut dyn RunnerServiceRuntimeLauncher,
 ) -> Result<String, String> {
-    if let Some(log_path) = &service_options.log_path {
-        env::set_var(LOG_PATH_ENV, log_path);
-    }
+    let log_path = service_options
+        .log_path
+        .clone()
+        .unwrap_or_else(default_log_path);
+    service_options.log_path = Some(log_path.clone());
     let credential = load_credential(store, &resolved.profile)?;
+    append_runner_service_log(
+        &log_path,
+        &credential,
+        "info",
+        "runner.service.starting",
+        "runner service is starting",
+        json!({"profile": resolved.profile, "once": service_options.once}),
+    )?;
     let Some(binding_id) = resolved.binding_id.as_deref() else {
         return Err(
             "RUNNER_SERVICE_BINDING_REQUIRED: selected profile has no bindingId".to_string(),
@@ -2462,8 +5633,24 @@ fn run_runner_service_run_parsed<C: ManagementApiClient>(
     let guard =
         acquire_runner_runtime_guard(&service_options.config_path, binding_id, "loomex-service")
             .map_err(format_core_error)?;
+    let recovery_path = runner_job_recovery_path(guard.path());
+    let mut recovery = RunnerJobRecoveryJournal::open(&recovery_path).map_err(format_core_error)?;
     if service_options.once {
-        let start = run_runner_control_service_once(client, &credential, resolved, binding_id)?;
+        let start = run_runner_control_service_once(
+            client,
+            &credential,
+            resolved,
+            binding_id,
+            &mut recovery,
+        )?;
+        append_runner_service_log(
+            &log_path,
+            &credential,
+            "info",
+            "runner.service.tick",
+            "runner service completed one control tick",
+            json!({"event": start.event, "transport": start.transport}),
+        )?;
         if options.json {
             return Ok(json!({
                 "schemaVersion": "loomex.cli.runnerServiceRun/v1",
@@ -2483,7 +5670,14 @@ fn run_runner_service_run_parsed<C: ManagementApiClient>(
             guard.path().display()
         ));
     }
-    run_runner_control_service_loop(client, &credential, resolved, binding_id)?;
+    run_runner_control_service_loop(
+        client,
+        &credential,
+        resolved,
+        binding_id,
+        &mut recovery,
+        &log_path,
+    )?;
     drop(guard);
     Ok(String::new())
 }
@@ -2493,13 +5687,19 @@ fn run_runner_control_service_once<C: ManagementApiClient>(
     credential: &ManagementCredential,
     resolved: &loomex_core::ResolvedCliSettings,
     binding_id: &str,
+    recovery: &mut RunnerJobRecoveryJournal,
 ) -> Result<RunnerServiceRuntimeStart, String> {
     let session = create_runner_control_session(client, credential, resolved, binding_id)?;
     let session_id = session_id_from_response(&session)?;
     write_runner_session_marker(&session_id);
-    let event = match process_one_runner_control_job(client, credential, resolved, &session_id)? {
-        true => "job.processed",
-        false => "idle",
+    let recovered =
+        recover_pending_runner_jobs(client, credential, resolved, &session_id, recovery)?;
+    let event = if recovered {
+        "job.recovered"
+    } else if process_one_runner_control_job(client, credential, resolved, &session_id, recovery)? {
+        "job.processed"
+    } else {
+        "idle"
     };
     Ok(RunnerServiceRuntimeStart {
         transport: "runner_control_long_poll".to_string(),
@@ -2513,28 +5713,95 @@ fn run_runner_control_service_loop<C: ManagementApiClient>(
     credential: &ManagementCredential,
     resolved: &loomex_core::ResolvedCliSettings,
     binding_id: &str,
+    recovery: &mut RunnerJobRecoveryJournal,
+    log_path: &Path,
+) -> Result<(), String> {
+    let mut retry_delay = Duration::from_secs(1);
+    loop {
+        let result = run_runner_control_session(
+            client, credential, resolved, binding_id, recovery, log_path,
+        );
+        match result {
+            Ok(()) => return Ok(()),
+            Err(err) if is_terminal_service_runtime_error(&err) => return Err(err),
+            Err(err) => {
+                let _ = append_runner_service_log(
+                    log_path,
+                    credential,
+                    "warn",
+                    "runner.service.disconnected",
+                    "runner control session disconnected; retrying",
+                    json!({"retryDelaySeconds": retry_delay.as_secs(), "error": err}),
+                );
+                eprintln!(
+                    "runner control session disconnected; retrying in {}s: {err}",
+                    retry_delay.as_secs()
+                );
+                thread::sleep(retry_delay);
+                retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(30));
+            }
+        }
+    }
+}
+
+fn run_runner_control_session<C: ManagementApiClient>(
+    client: &mut C,
+    credential: &ManagementCredential,
+    resolved: &loomex_core::ResolvedCliSettings,
+    binding_id: &str,
+    recovery: &mut RunnerJobRecoveryJournal,
+    log_path: &Path,
 ) -> Result<(), String> {
     let session = create_runner_control_session(client, credential, resolved, binding_id)?;
     let session_id = session_id_from_response(&session)?;
     write_runner_session_marker(&session_id);
+    let _ = append_runner_service_log(
+        log_path,
+        credential,
+        "info",
+        "runner.service.connected",
+        "runner control session connected",
+        json!({"sessionId": session_id}),
+    );
     eprintln!("runner control session connected: {session_id}");
+    recover_pending_runner_jobs(client, credential, resolved, &session_id, recovery)?;
     let mut idle_ticks = 0usize;
     loop {
-        let processed = process_one_runner_control_job(client, credential, resolved, &session_id)?;
+        let processed =
+            process_one_runner_control_job(client, credential, resolved, &session_id, recovery)?;
         if processed {
             idle_ticks = 0;
-        } else {
-            idle_ticks += 1;
-            if idle_ticks % 10 == 0 {
-                let _ = client.heartbeat_runner_session(
+            continue;
+        }
+        idle_ticks += 1;
+        if idle_ticks.is_multiple_of(10) {
+            client
+                .heartbeat_runner_session(
                     credential,
                     &session_id,
                     runner_control_manifest(resolved, binding_id),
-                );
-            }
-            thread::sleep(Duration::from_millis(500));
+                )
+                .map_err(format_core_error)?;
         }
+        thread::sleep(Duration::from_millis(500));
     }
+}
+
+fn append_runner_service_log(
+    log_path: &Path,
+    credential: &ManagementCredential,
+    level: &str,
+    event_type: &str,
+    message: &str,
+    metadata: Value,
+) -> Result<(), String> {
+    let mut secrets = vec![credential.access_token.clone()];
+    if let Some(refresh_token) = credential.refresh_token.as_ref() {
+        secrets.push(refresh_token.clone());
+    }
+    FileLogSink::new(log_path, loomex_core::redaction::Redactor::new(secrets))
+        .append_result(LogEntry::new(level, event_type, message).with_metadata(metadata))
+        .map_err(format_core_error)
 }
 
 fn create_runner_control_session<C: ManagementApiClient>(
@@ -2565,7 +5832,15 @@ fn runner_control_manifest(resolved: &loomex_core::ResolvedCliSettings, binding_
             "file.list": true,
             "file.read_many": true,
             "file.write_many": true,
-            "fs.write": true
+            "fs.list": true,
+            "fs.read": true,
+            "fs.write": true,
+            "fs.apply_patch": true,
+            "shell.exec": true,
+            "git.status": true,
+            "git.diff": true,
+            "git.log": true,
+            "http.request": true
         }
     })
 }
@@ -2586,6 +5861,10 @@ fn runner_session_marker_path(guard_path: &Path) -> PathBuf {
     guard_path.with_extension("session")
 }
 
+fn runner_job_recovery_path(guard_path: &Path) -> PathBuf {
+    guard_path.with_extension("jobs.json")
+}
+
 fn write_runner_session_marker(session_id: &str) {
     let Ok(guard_path) = env::var(RUNNER_GUARD_PATH_ENV) else {
         return;
@@ -2597,11 +5876,326 @@ fn write_runner_session_marker(session_id: &str) {
     let _ = fs::write(marker_path, format!("session_id={session_id}\n"));
 }
 
+fn current_epoch_ms() -> Result<u64, String> {
+    current_epoch_seconds().map(|seconds| seconds.saturating_mul(1_000))
+}
+
+fn recoverable_runner_job(
+    job: &Value,
+    resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
+    now_epoch_ms: u64,
+) -> Result<RecoverableRunnerJob, String> {
+    let remote = remote_runner_job(job)?;
+    if remote.session_id.as_deref() != Some(session_id) {
+        return Err(
+            "RUNNER_JOB_INVALID: leased job is not owned by the current session".to_string(),
+        );
+    }
+    if remote.status != RemoteRunnerJobStatus::Leased {
+        return Err("RUNNER_JOB_INVALID: lease response status must be leased".to_string());
+    }
+    let runner_id = required_job_string(job, "runnerId").or_else(|_| {
+        resolved
+            .runner_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "RUNNER_JOB_INVALID: runnerId is required".to_string())
+    })?;
+    Ok(RecoverableRunnerJob {
+        job_id: remote.job_id,
+        runner_id,
+        session_id: session_id.to_string(),
+        kind: required_job_string(job, "kind")?,
+        idempotency_key: required_job_string(job, "idempotencyKey")?,
+        payload_fingerprint: remote.payload_fingerprint,
+        attempt_count: remote.attempt_count,
+        lease_version: remote.lease_version,
+        leased_until_epoch_ms: remote.leased_until_epoch_ms.ok_or_else(|| {
+            "RUNNER_JOB_INVALID: leasedUntilEpochMs is required for an active lease".to_string()
+        })?,
+        replay_safety: if job.get("replaySafe").and_then(Value::as_bool) == Some(true) {
+            JobReplaySafety::Idempotent
+        } else {
+            JobReplaySafety::ManualReconciliation
+        },
+        phase: RecoverableJobPhase::Leased,
+        terminal_payload: None,
+        updated_at_epoch_ms: now_epoch_ms,
+    })
+}
+
+fn remote_runner_job(job: &Value) -> Result<RemoteRunnerJobSnapshot, String> {
+    let status = match required_job_string(job, "status")?.as_str() {
+        "queued" => RemoteRunnerJobStatus::Queued,
+        "leased" => RemoteRunnerJobStatus::Leased,
+        "running" => RemoteRunnerJobStatus::Running,
+        "succeeded" => RemoteRunnerJobStatus::Succeeded,
+        "failed" => RemoteRunnerJobStatus::Failed,
+        "canceling" => RemoteRunnerJobStatus::Canceling,
+        "canceled" | "cancelled" => RemoteRunnerJobStatus::Canceled,
+        "expired" => RemoteRunnerJobStatus::Expired,
+        other => {
+            return Err(format!(
+                "RUNNER_JOB_INVALID: unsupported job status {other}"
+            ))
+        }
+    };
+    Ok(RemoteRunnerJobSnapshot {
+        job_id: job_id(job)?,
+        session_id: job
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
+        status,
+        attempt_count: required_job_u64(job, "attemptCount")?
+            .try_into()
+            .map_err(|_| "RUNNER_JOB_INVALID: attemptCount exceeds u32".to_string())?,
+        lease_version: required_job_u64(job, "leaseVersion")?,
+        leased_until_epoch_ms: job.get("leasedUntilEpochMs").and_then(Value::as_u64),
+        payload_fingerprint: required_job_string(job, "payloadDigest")?,
+    })
+}
+
+fn required_job_string(job: &Value, field: &str) -> Result<String, String> {
+    job.get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("RUNNER_JOB_INVALID: {field} is required"))
+}
+
+fn required_job_u64(job: &Value, field: &str) -> Result<u64, String> {
+    job.get(field)
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("RUNNER_JOB_INVALID: {field} must be positive"))
+}
+
+fn recover_pending_runner_jobs<C: ManagementApiClient>(
+    client: &mut C,
+    credential: &ManagementCredential,
+    resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
+    recovery: &mut RunnerJobRecoveryJournal,
+) -> Result<bool, String> {
+    let pending = recovery.pending_jobs().to_vec();
+    let mut processed = false;
+    for local in pending {
+        let response = client
+            .get_runner_job(credential, &local.job_id)
+            .map_err(format_core_error)?;
+        let mut job = response
+            .job
+            .ok_or_else(|| "RUNNER_JOB_RECOVERY_INVALID: server job missing".to_string())?;
+        let mut remote = remote_runner_job(&job)?;
+        let now_epoch_ms = current_epoch_ms()?;
+        let mut action = recovery
+            .recovery_action(&local.job_id, Some(&remote), session_id, now_epoch_ms)
+            .map_err(format_core_error)?;
+
+        if action == JobRecoveryAction::ForgetTerminal {
+            recovery
+                .forget_server_terminal(&local.job_id, &remote)
+                .map_err(format_core_error)?;
+            processed = true;
+            continue;
+        }
+        if matches!(action, JobRecoveryAction::WaitForLeaseExpiry { .. }) {
+            continue;
+        }
+        if action == JobRecoveryAction::RequestServerReclaim {
+            let terminal_submission = recovery_terminal_submission(&local);
+            let reclaimed = client
+                .reclaim_runner_job(
+                    credential,
+                    session_id,
+                    &local.job_id,
+                    remote.lease_version,
+                    &local.payload_fingerprint,
+                    &local.idempotency_key,
+                    terminal_submission.as_ref(),
+                )
+                .map_err(format_core_error)?;
+            job = reclaimed
+                .job
+                .ok_or_else(|| "RUNNER_JOB_RECLAIM_INVALID: response job missing".to_string())?;
+            remote = remote_runner_job(&job)?;
+            if remote.status.is_terminal() {
+                recovery
+                    .forget_server_terminal(&local.job_id, &remote)
+                    .map_err(format_core_error)?;
+                processed = true;
+                continue;
+            }
+            recovery
+                .adopt_reclaimed_lease(&local.job_id, &remote, session_id, current_epoch_ms()?)
+                .map_err(format_core_error)?;
+            action = recovery
+                .recovery_action(
+                    &local.job_id,
+                    Some(&remote),
+                    session_id,
+                    current_epoch_ms()?,
+                )
+                .map_err(format_core_error)?;
+        } else if remote.session_id.as_deref() == Some(session_id)
+            && recovery
+                .job(&local.job_id)
+                .is_some_and(|record| record.session_id != session_id)
+        {
+            recovery
+                .adopt_reclaimed_lease(&local.job_id, &remote, session_id, current_epoch_ms()?)
+                .map_err(format_core_error)?;
+            action = recovery
+                .recovery_action(
+                    &local.job_id,
+                    Some(&remote),
+                    session_id,
+                    current_epoch_ms()?,
+                )
+                .map_err(format_core_error)?;
+        }
+
+        match action {
+            JobRecoveryAction::StartExecution | JobRecoveryAction::ResumeIdempotentExecution => {
+                execute_and_finalize_runner_job(
+                    client, credential, resolved, session_id, &job, recovery,
+                )?;
+                processed = true;
+            }
+            JobRecoveryAction::SubmitSucceeded(result) => {
+                submit_recovered_terminal(
+                    client,
+                    credential,
+                    session_id,
+                    &local.job_id,
+                    recovery,
+                    true,
+                    result,
+                )?;
+                processed = true;
+            }
+            JobRecoveryAction::SubmitFailed(error) => {
+                submit_recovered_terminal(
+                    client,
+                    credential,
+                    session_id,
+                    &local.job_id,
+                    recovery,
+                    false,
+                    error,
+                )?;
+                processed = true;
+            }
+            JobRecoveryAction::ManualReconciliation { reason } => {
+                let record = recovery.job(&local.job_id).ok_or_else(|| {
+                    "RUNNER_JOB_RECOVERY_INVALID: local record disappeared".to_string()
+                })?;
+                if record.session_id != session_id
+                    || remote.session_id.as_deref() != Some(session_id)
+                {
+                    return Err(format!("RUNNER_JOB_RECOVERY_UNCERTAIN: {reason}"));
+                }
+                let error = json!({
+                    "code": "RUNNER_JOB_RECOVERY_UNCERTAIN",
+                    "message": reason,
+                    "requiresHumanReconciliation": true
+                });
+                recovery
+                    .record_failed(
+                        &local.job_id,
+                        session_id,
+                        error.clone(),
+                        current_epoch_ms()?,
+                    )
+                    .map_err(format_core_error)?;
+                submit_recovered_terminal(
+                    client,
+                    credential,
+                    session_id,
+                    &local.job_id,
+                    recovery,
+                    false,
+                    error,
+                )?;
+                processed = true;
+            }
+            JobRecoveryAction::ForgetTerminal
+            | JobRecoveryAction::WaitForLeaseExpiry { .. }
+            | JobRecoveryAction::RequestServerReclaim => {
+                return Err(
+                    "RUNNER_JOB_RECOVERY_INVALID: recovery action did not converge".to_string(),
+                );
+            }
+        }
+    }
+    Ok(processed)
+}
+
+fn recovery_terminal_submission(job: &RecoverableRunnerJob) -> Option<Value> {
+    match job.phase {
+        RecoverableJobPhase::SucceededPendingAck => job
+            .terminal_payload
+            .clone()
+            .map(|result| json!({"status": "succeeded", "result": result})),
+        RecoverableJobPhase::FailedPendingAck => job
+            .terminal_payload
+            .clone()
+            .map(|error| json!({"status": "failed", "error": error})),
+        RecoverableJobPhase::Leased | RecoverableJobPhase::Running => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_recovered_terminal<C: ManagementApiClient>(
+    client: &mut C,
+    credential: &ManagementCredential,
+    session_id: &str,
+    job_id: &str,
+    recovery: &mut RunnerJobRecoveryJournal,
+    succeeded: bool,
+    payload: Value,
+) -> Result<(), String> {
+    let record = recovery
+        .job(job_id)
+        .cloned()
+        .ok_or_else(|| "RUNNER_JOB_RECOVERY_INVALID: local record missing".to_string())?;
+    if succeeded {
+        client
+            .complete_runner_job_idempotent(
+                credential,
+                session_id,
+                job_id,
+                record.lease_version,
+                &record.idempotency_key,
+                payload,
+            )
+            .map_err(format_core_error)?;
+    } else {
+        client
+            .fail_runner_job_idempotent(
+                credential,
+                session_id,
+                job_id,
+                record.lease_version,
+                &record.idempotency_key,
+                payload,
+            )
+            .map_err(format_core_error)?;
+    }
+    recovery
+        .acknowledge_terminal(job_id)
+        .map_err(format_core_error)
+}
+
 fn process_one_runner_control_job<C: ManagementApiClient>(
     client: &mut C,
     credential: &ManagementCredential,
     resolved: &loomex_core::ResolvedCliSettings,
     session_id: &str,
+    recovery: &mut RunnerJobRecoveryJournal,
 ) -> Result<bool, String> {
     let lease = client
         .lease_runner_job(credential, session_id)
@@ -2609,16 +6203,64 @@ fn process_one_runner_control_job<C: ManagementApiClient>(
     let Some(job) = lease.job else {
         return Ok(false);
     };
-    let job_id = job_id(&job)?;
-    client
-        .start_runner_job(credential, session_id, &job_id)
+    let now_epoch_ms = current_epoch_ms()?;
+    let recoverable = recoverable_runner_job(&job, resolved, session_id, now_epoch_ms)?;
+    recovery
+        .record_lease(recoverable)
         .map_err(format_core_error)?;
-    match execute_runner_control_job(resolved, &job) {
+    execute_and_finalize_runner_job(client, credential, resolved, session_id, &job, recovery)?;
+    Ok(true)
+}
+
+fn execute_and_finalize_runner_job<C: ManagementApiClient>(
+    client: &mut C,
+    credential: &ManagementCredential,
+    resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
+    job: &Value,
+    recovery: &mut RunnerJobRecoveryJournal,
+) -> Result<(), String> {
+    let job_id = job_id(job)?;
+    let lease_version = required_job_u64(job, "leaseVersion")?;
+    required_job_string(job, "idempotencyKey")?;
+    if job.get("status").and_then(Value::as_str) == Some("leased") {
+        client
+            .start_runner_job_leased(credential, session_id, &job_id, lease_version)
+            .map_err(format_core_error)?;
+    }
+    recovery
+        .mark_running(&job_id, session_id, current_epoch_ms()?)
+        .map_err(format_core_error)?;
+    let execution = if matches!(
+        job.get("kind").and_then(Value::as_str),
+        Some("shell.exec" | "command.run")
+    ) {
+        execute_cancellable_runner_job(
+            client,
+            credential,
+            resolved,
+            session_id,
+            &job_id,
+            lease_version,
+            job,
+            recovery,
+        )
+    } else {
+        execute_runner_control_job_for_session(resolved, session_id, job)
+    };
+    match execution {
         Ok(result) => {
-            let _ = client.append_runner_job_events(
+            recovery
+                .record_succeeded(&job_id, session_id, result.clone(), current_epoch_ms()?)
+                .map_err(format_core_error)?;
+            let terminal_record = recovery.job(&job_id).cloned().ok_or_else(|| {
+                "RUNNER_JOB_RECOVERY_INVALID: terminal record missing".to_string()
+            })?;
+            let _ = client.append_runner_job_events_leased(
                 credential,
                 session_id,
                 &job_id,
+                terminal_record.lease_version,
                 vec![json!({
                     "eventType": "stdout",
                     "stream": "stdout",
@@ -2627,15 +6269,29 @@ fn process_one_runner_control_job<C: ManagementApiClient>(
                 })],
             );
             client
-                .complete_runner_job(credential, session_id, &job_id, result)
+                .complete_runner_job_idempotent(
+                    credential,
+                    session_id,
+                    &job_id,
+                    terminal_record.lease_version,
+                    &terminal_record.idempotency_key,
+                    result,
+                )
                 .map_err(format_core_error)?;
         }
         Err(err) => {
             let error = json!({"code": "RUNNER_JOB_EXECUTION_FAILED", "message": err});
-            let _ = client.append_runner_job_events(
+            recovery
+                .record_failed(&job_id, session_id, error.clone(), current_epoch_ms()?)
+                .map_err(format_core_error)?;
+            let terminal_record = recovery.job(&job_id).cloned().ok_or_else(|| {
+                "RUNNER_JOB_RECOVERY_INVALID: terminal record missing".to_string()
+            })?;
+            let _ = client.append_runner_job_events_leased(
                 credential,
                 session_id,
                 &job_id,
+                terminal_record.lease_version,
                 vec![json!({
                     "eventType": "stderr",
                     "stream": "stderr",
@@ -2644,11 +6300,114 @@ fn process_one_runner_control_job<C: ManagementApiClient>(
                 })],
             );
             client
-                .fail_runner_job(credential, session_id, &job_id, error)
+                .fail_runner_job_idempotent(
+                    credential,
+                    session_id,
+                    &job_id,
+                    terminal_record.lease_version,
+                    &terminal_record.idempotency_key,
+                    error,
+                )
                 .map_err(format_core_error)?;
         }
     }
-    Ok(true)
+    recovery
+        .acknowledge_terminal(&job_id)
+        .map_err(format_core_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_cancellable_runner_job<C: ManagementApiClient>(
+    client: &mut C,
+    credential: &ManagementCredential,
+    resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
+    job_id: &str,
+    initial_lease_version: u64,
+    job: &Value,
+    recovery: &mut RunnerJobRecoveryJournal,
+) -> Result<Value, String> {
+    let cancellation = ShellCancellationToken::default();
+    let worker_cancellation = cancellation.clone();
+    let worker_resolved = resolved.clone();
+    let worker_session_id = session_id.to_string();
+    let worker_job = job.clone();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let worker = thread::Builder::new()
+        .name(format!("loomex-job-{job_id}"))
+        .spawn(move || {
+            let result = execute_runner_control_job_with_cancel(
+                &worker_resolved,
+                &worker_session_id,
+                &worker_job,
+                Some(&worker_cancellation),
+            );
+            let _ = sender.send(result);
+        })
+        .map_err(|err| format!("RUNNER_JOB_THREAD_FAILED: {err}"))?;
+    let mut lease_version = initial_lease_version;
+    let mut next_renewal_epoch_ms = current_epoch_ms()?.saturating_add(10_000);
+    loop {
+        match receiver.try_recv() {
+            Ok(result) => {
+                let _ = worker.join();
+                return result;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                let _ = worker.join();
+                return Err("RUNNER_JOB_THREAD_FAILED: worker disconnected".to_string());
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        if client
+            .list_runner_job_cancellations(credential, session_id)
+            .map(|jobs| {
+                jobs.iter()
+                    .any(|item| job_id_from_value(item) == Some(job_id))
+            })
+            .unwrap_or(false)
+        {
+            cancellation.cancel();
+        }
+        let now_epoch_ms = current_epoch_ms()?;
+        if now_epoch_ms >= next_renewal_epoch_ms {
+            let renewed = client
+                .renew_runner_job(credential, session_id, job_id, lease_version)
+                .map_err(format_core_error)?
+                .job
+                .ok_or_else(|| "RUNNER_JOB_RENEW_INVALID: response job missing".to_string())?;
+            let remote = remote_runner_job(&renewed)?;
+            if remote.session_id.as_deref() != Some(session_id)
+                || remote.lease_version <= lease_version
+            {
+                cancellation.cancel();
+                return Err("RUNNER_JOB_RENEW_INVALID: renewed lease ownership changed".to_string());
+            }
+            let leased_until_epoch_ms = remote.leased_until_epoch_ms.ok_or_else(|| {
+                "RUNNER_JOB_RENEW_INVALID: leasedUntilEpochMs missing".to_string()
+            })?;
+            recovery
+                .renew_lease(
+                    job_id,
+                    session_id,
+                    remote.lease_version,
+                    leased_until_epoch_ms,
+                    now_epoch_ms,
+                )
+                .map_err(format_core_error)?;
+            lease_version = remote.lease_version;
+            let remaining = leased_until_epoch_ms.saturating_sub(now_epoch_ms);
+            next_renewal_epoch_ms = now_epoch_ms.saturating_add((remaining / 3).max(1_000));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn job_id_from_value(value: &Value) -> Option<&str> {
+    value
+        .get("id")
+        .or_else(|| value.get("jobId"))
+        .and_then(Value::as_str)
 }
 
 fn job_id(job: &Value) -> Result<String, String> {
@@ -2659,17 +6418,91 @@ fn job_id(job: &Value) -> Result<String, String> {
         .ok_or_else(|| "RUNNER_JOB_INVALID: job id missing".to_string())
 }
 
+#[cfg(test)]
 fn execute_runner_control_job(
     resolved: &loomex_core::ResolvedCliSettings,
     job: &Value,
 ) -> Result<Value, String> {
+    execute_runner_control_job_for_session(resolved, "local-test-session", job)
+}
+
+fn execute_runner_control_job_for_session(
+    resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
+    job: &Value,
+) -> Result<Value, String> {
+    execute_runner_control_job_with_cancel(resolved, session_id, job, None)
+}
+
+fn execute_runner_control_job_with_cancel(
+    resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
+    job: &Value,
+    cancellation: Option<&ShellCancellationToken>,
+) -> Result<Value, String> {
     let kind = job.get("kind").and_then(Value::as_str).unwrap_or_default();
     match kind {
-        "file.list" => execute_file_list_job(resolved, job),
-        "file.read_many" => execute_file_read_many_job(resolved, job),
-        "file.write_many" => execute_file_write_many_job(resolved, job),
+        "file.list" => execute_file_list_job(resolved, session_id, job),
+        "file.read_many" => execute_file_read_many_job(resolved, session_id, job),
+        "file.write_many" => execute_file_write_many_job(resolved, session_id, job),
+        "fs.list" | "fs.read" | "fs.write" | "fs.apply_patch" | "shell.exec" | "git.status"
+        | "git.diff" | "git.log" | "http.request" => {
+            execute_local_capability_job(resolved, session_id, kind, job, cancellation)
+        }
+        "command.run" => {
+            execute_local_capability_job(resolved, session_id, "shell.exec", job, cancellation)
+        }
         other => Err(format!("unsupported runner job kind {other}")),
     }
+}
+
+fn execute_local_capability_job(
+    resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
+    capability: &str,
+    job: &Value,
+    supplied_cancellation: Option<&ShellCancellationToken>,
+) -> Result<Value, String> {
+    let payload = job.get("payload").cloned().unwrap_or_else(|| json!({}));
+    let requested_path = payload.get("path").and_then(Value::as_str).unwrap_or(".");
+    authorize_runner_path(resolved, session_id, capability, requested_path)?;
+    let executor = LocalCapabilityExecutor::new(runner_workspace_root(resolved)?)
+        .map_err(format_core_error)?;
+    if capability == "shell.exec" {
+        let input: ShellExecInput = serde_json::from_value(payload)
+            .map_err(|err| format!("RUNNER_JOB_PAYLOAD_INVALID: {err}"))?;
+        let cancellation = supplied_cancellation.cloned().unwrap_or_default();
+        if job.get("status").and_then(Value::as_str) == Some("canceling")
+            || job
+                .get("cancelRequested")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            cancellation.cancel();
+        }
+        let output = executor
+            .shell_exec_with_cancel(input, &cancellation)
+            .map_err(format_core_error)?;
+        return Ok(json!({
+            "exitCode": output.exit_code,
+            "durationMs": output.duration_ms,
+            "stdoutRef": output.stdout_ref,
+            "stderrRef": output.stderr_ref,
+            "stdout": output.artifacts.stdout,
+            "stderr": output.artifacts.stderr,
+            "timedOut": output.artifacts.timed_out,
+            "cancelled": output.artifacts.cancelled,
+            "truncated": output.truncated,
+        }));
+    }
+    let result = executor
+        .execute(CapabilityRequest {
+            capability: capability.to_string(),
+            input: serde_json::to_string(&payload)
+                .map_err(|err| format!("RUNNER_JOB_PAYLOAD_INVALID: {err}"))?,
+        })
+        .map_err(format_core_error)?;
+    serde_json::from_str(&result.output).map_err(|err| format!("RUNNER_JOB_RESULT_INVALID: {err}"))
 }
 
 fn runner_workspace_root(resolved: &loomex_core::ResolvedCliSettings) -> Result<PathBuf, String> {
@@ -2680,8 +6513,107 @@ fn runner_workspace_root(resolved: &loomex_core::ResolvedCliSettings) -> Result<
     .map_err(|err| format!("workspace path is not accessible: {err}"))
 }
 
+fn authorize_runner_path(
+    resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
+    capability: &str,
+    relative_path: &str,
+) -> Result<(), String> {
+    let root = runner_workspace_root(resolved)?;
+    let relative = validate_runner_relative_path(relative_path)?;
+    let requested = root.join(relative);
+    let requested_string = requested.to_string_lossy().to_string();
+    let resolved_string = requested
+        .exists()
+        .then(|| requested.canonicalize())
+        .transpose()
+        .map_err(|err| format!("RUNNER_JOB_PATH_INVALID: {err}"))?
+        .map(|path| path.to_string_lossy().to_string());
+    let organization_id = resolved.organization_id.clone().ok_or_else(|| {
+        "RUNNER_SERVICE_ORGANIZATION_REQUIRED: selected profile has no organizationId".to_string()
+    })?;
+    let project_id = resolved.project_id.clone().ok_or_else(|| {
+        "RUNNER_SERVICE_PROJECT_REQUIRED: selected profile has no projectId".to_string()
+    })?;
+    let binding_id = resolved.binding_id.clone().ok_or_else(|| {
+        "RUNNER_SERVICE_BINDING_REQUIRED: selected profile has no bindingId".to_string()
+    })?;
+    let runner_device_id = resolved
+        .runner_id
+        .clone()
+        .unwrap_or_else(|| "loomex-local-runner".to_string());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("RUNNER_CLOCK_INVALID: {err}"))?
+        .as_millis() as u64;
+    let binding = ProjectRunnerBinding {
+        id: binding_id.clone(),
+        organization_id: organization_id.clone(),
+        project_id: project_id.clone(),
+        runner_device_id: runner_device_id.clone(),
+        workspace: WorkspacePath::new(root.to_string_lossy().to_string(), None)
+            .map_err(format_core_error)?,
+        status: BindingStatus::Active,
+        created_by: "runner-control".to_string(),
+        last_seen_at_epoch_ms: Some(now),
+        revoked_at_epoch_ms: None,
+    };
+    let session = RunnerSession {
+        id: session_id.to_string(),
+        organization_id: organization_id.clone(),
+        project_id: project_id.clone(),
+        runner_device_id,
+        project_runner_binding_id: binding_id.clone(),
+        status: RunnerSessionStatus::Connected,
+        last_seen_at_epoch_ms: Some(now),
+        lease_expires_at_epoch_ms: now.saturating_add(60_000),
+        connected_at_epoch_ms: now,
+        disconnected_at_epoch_ms: None,
+        replaced_by_session_id: None,
+        disconnect_reason: None,
+    };
+    let grant = RunnerCapabilityGrant {
+        project_runner_binding_id: binding_id,
+        capability: capability.to_string(),
+        granted_by: "runner-control-leased-job".to_string(),
+        created_at_epoch_ms: now,
+        revoked_at_epoch_ms: None,
+    };
+    let context = BindingValidationContext {
+        organization_id,
+        project_id,
+        project_permission_active: true,
+    };
+    loomex_core::binding::validate_session_and_grant_for_local_tool_call(
+        Some(&binding),
+        Some(&session),
+        Some(&grant),
+        &context,
+        capability,
+        &requested_string,
+        resolved_string.as_deref(),
+    )
+    .map_err(format_core_error)?;
+    let policy = PolicyEngine::new(vec![PolicyLayer {
+        source: PolicySource::Project,
+        default_decision: Some(PolicyDecision::Deny),
+        rules: vec![PolicyRule::for_capability(
+            capability,
+            PolicyDecision::Allow,
+        )],
+    }]);
+    let mut input = PolicyEvaluationInput::capability(capability);
+    input.requested_path = Some(requested_string);
+    input.resolved_path = resolved_string;
+    let decision = policy
+        .dry_run(&input, &binding)
+        .map_err(format_core_error)?;
+    enforce_policy_decision(&decision).map_err(format_core_error)
+}
+
 fn execute_file_list_job(
     resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
     job: &Value,
 ) -> Result<Value, String> {
     let workspace_root = runner_workspace_root(resolved)?;
@@ -2698,23 +6630,35 @@ fn execute_file_list_job(
         .and_then(|payload| payload.get("includeHidden"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let root = safe_runner_path(&workspace_root, raw_path)?;
-    let mut files = Vec::new();
-    let max_entries = limit.max(1);
-    collect_runner_file_entries(
-        &root,
-        &workspace_root,
-        &mut files,
-        max_entries,
-        include_hidden,
-    )
-    .map_err(|err| format!("failed to list files: {err}"))?;
-    let truncated = files.len() >= max_entries;
-    Ok(json!({ "files": files, "truncated": truncated }))
+    authorize_runner_path(resolved, session_id, "fs.list", raw_path)?;
+    let executor = LocalCapabilityExecutor::new(workspace_root).map_err(format_core_error)?;
+    let output = executor
+        .fs_list(FsListInput {
+            path: raw_path.to_string(),
+            recursive: Some(true),
+            include_hidden: Some(include_hidden),
+            follow_symlinks: Some(false),
+            max_entries: Some(limit.max(1)),
+        })
+        .map_err(format_core_error)?;
+    let files = output
+        .entries
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "path": entry.path,
+                "type": entry.entry_type,
+                "sizeBytes": entry.size_bytes,
+                "modifiedEpochMs": entry.modified_epoch_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "files": files, "truncated": output.truncated }))
 }
 
 fn execute_file_read_many_job(
     resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
     job: &Value,
 ) -> Result<Value, String> {
     let workspace_root = runner_workspace_root(resolved)?;
@@ -2732,17 +6676,23 @@ fn execute_file_read_many_job(
         let raw_path = item
             .as_str()
             .ok_or_else(|| "file.read_many files must contain paths".to_string())?;
-        let path = safe_runner_path(&workspace_root, raw_path)?;
-        let data = fs::read(&path).map_err(|err| format!("failed to read file: {err}"))?;
-        let truncated = data.len() > max_bytes;
-        let content_bytes = &data[..data.len().min(max_bytes)];
-        let relative = path
-            .strip_prefix(&workspace_root)
-            .map_err(|_| "read path escaped runner workspace".to_string())?;
+        authorize_runner_path(resolved, session_id, "fs.read", raw_path)?;
+        let output = LocalCapabilityExecutor::new(&workspace_root)
+            .map_err(format_core_error)?
+            .fs_read(FsReadInput {
+                path: raw_path.to_string(),
+                encoding: Some("utf-8".to_string()),
+                offset: None,
+                max_bytes: Some(max_bytes),
+            })
+            .map_err(format_core_error)?;
         result.push(json!({
-            "path": relative.to_string_lossy(),
-            "content": String::from_utf8_lossy(content_bytes),
-            "truncated": truncated
+            "path": output.path,
+            "content": output.content,
+            "encoding": output.encoding,
+            "sha256": output.sha256,
+            "sizeBytes": output.size_bytes,
+            "truncated": output.truncated
         }));
     }
     Ok(json!({ "files": result }))
@@ -2750,6 +6700,7 @@ fn execute_file_read_many_job(
 
 fn execute_file_write_many_job(
     resolved: &loomex_core::ResolvedCliSettings,
+    session_id: &str,
     job: &Value,
 ) -> Result<Value, String> {
     let workspace_root = runner_workspace_root(resolved)?;
@@ -2764,12 +6715,7 @@ fn execute_file_write_many_job(
             .get("path")
             .and_then(Value::as_str)
             .ok_or_else(|| "file entry missing path".to_string())?;
-        let relative = validate_runner_relative_path(path)?;
-        let destination = workspace_root.join(&relative);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("failed to create parent directory: {err}"))?;
-        }
+        authorize_runner_path(resolved, session_id, "fs.write", path)?;
         let content = item
             .get("content")
             .and_then(Value::as_str)
@@ -2779,79 +6725,28 @@ fn execute_file_write_many_job(
                 "base64 file.write_many payloads are not supported by this runner".to_string(),
             );
         }
-        let bytes = content.as_bytes().to_vec();
-        fs::write(&destination, &bytes).map_err(|err| format!("failed to write file: {err}"))?;
+        let output = LocalCapabilityExecutor::new(&workspace_root)
+            .map_err(format_core_error)?
+            .fs_write(FsWriteInput {
+                path: path.to_string(),
+                content: content.to_string(),
+                encoding: "utf-8".to_string(),
+                mode: "overwrite".to_string(),
+                expected_sha256: item
+                    .get("expectedSha256")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                create_parent_directories: Some(true),
+            })
+            .map_err(format_core_error)?;
         written.push(json!({
-            "path": relative.to_string_lossy(),
-            "sizeBytes": bytes.len()
+            "path": output.path,
+            "sizeBytes": output.size_bytes,
+            "sha256": output.sha256,
+            "created": output.created
         }));
     }
     Ok(json!({ "writtenFiles": written }))
-}
-
-fn safe_runner_path(workspace_root: &Path, path: &str) -> Result<PathBuf, String> {
-    let relative = validate_runner_relative_path(path)?;
-    let candidate = workspace_root.join(relative);
-    let resolved = if candidate.exists() {
-        candidate
-            .canonicalize()
-            .map_err(|err| format!("workspace path is not accessible: {err}"))?
-    } else {
-        candidate
-    };
-    if resolved != workspace_root && !resolved.starts_with(workspace_root) {
-        return Err("file path must stay inside runner workspace".to_string());
-    }
-    Ok(resolved)
-}
-
-fn collect_runner_file_entries(
-    root: &Path,
-    workspace_root: &Path,
-    files: &mut Vec<Value>,
-    limit: usize,
-    include_hidden: bool,
-) -> io::Result<()> {
-    if files.len() >= limit {
-        return Ok(());
-    }
-    let mut entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|entry| entry.path());
-    for entry in entries {
-        if files.len() >= limit {
-            break;
-        }
-        let path = entry.path();
-        let relative = path.strip_prefix(workspace_root).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "listed path escaped runner workspace",
-            )
-        })?;
-        if !include_hidden && relative_has_hidden_component(relative) {
-            continue;
-        }
-        let metadata = fs::metadata(&path)?;
-        let is_dir = metadata.is_dir();
-        files.push(json!({
-            "path": relative.to_string_lossy(),
-            "type": if is_dir { "directory" } else { "file" },
-            "sizeBytes": if metadata.is_file() { metadata.len() } else { 0 }
-        }));
-        if is_dir {
-            collect_runner_file_entries(&path, workspace_root, files, limit, include_hidden)?;
-        }
-    }
-    Ok(())
-}
-
-fn relative_has_hidden_component(path: &Path) -> bool {
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|part| part.starts_with('.'))
-    })
 }
 
 fn validate_runner_relative_path(path: &str) -> Result<PathBuf, String> {
@@ -2885,14 +6780,75 @@ fn format_runner_service_manifest(
 }
 
 fn write_service_file(path: &Path, content: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("RUNNER_SERVICE_WRITE_FAILED: {err}"))?;
+    let parent = path.parent().ok_or_else(|| {
+        "RUNNER_SERVICE_WRITE_FAILED: service path has no parent directory".to_string()
+    })?;
+    fs::create_dir_all(parent).map_err(|err| format!("RUNNER_SERVICE_WRITE_FAILED: {err}"))?;
+    let parent_metadata = fs::symlink_metadata(parent)
+        .map_err(|err| format!("RUNNER_SERVICE_WRITE_FAILED: {err}"))?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(
+            "RUNNER_SERVICE_PATH_UNSAFE: service parent must be a non-symlink directory"
+                .to_string(),
+        );
     }
-    fs::write(path, content).map_err(|err| format!("RUNNER_SERVICE_WRITE_FAILED: {err}"))
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(
+                "RUNNER_SERVICE_PATH_UNSAFE: existing service path must be a regular non-symlink file"
+                    .to_string(),
+            );
+        }
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "RUNNER_SERVICE_PATH_UNSAFE: service filename is invalid".to_string())?;
+    let temporary = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
+    let result = (|| -> Result<(), String> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|err| format!("RUNNER_SERVICE_WRITE_FAILED: {err}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|err| format!("RUNNER_SERVICE_WRITE_FAILED: {err}"))?;
+        }
+        file.write_all(content.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|err| format!("RUNNER_SERVICE_WRITE_FAILED: {err}"))?;
+        fs::rename(&temporary, path)
+            .map_err(|err| format!("RUNNER_SERVICE_WRITE_FAILED: {err}"))?;
+        if let Ok(directory) = fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn default_service_install_path(options: &RunnerServiceOptions) -> Result<PathBuf, String> {
     match options.platform {
+        RunnerServicePlatform::MacOsLaunchAgent => {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            Ok(PathBuf::from(home)
+                .join("Library")
+                .join("LaunchAgents")
+                .join(format!("{}.plist", options.service_name)))
+        }
         RunnerServicePlatform::LinuxUserSystemd => {
             let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
             Ok(PathBuf::from(home)
@@ -2901,17 +6857,37 @@ fn default_service_install_path(options: &RunnerServiceOptions) -> Result<PathBu
                 .join("user")
                 .join(format!("{}.service", options.service_name)))
         }
-        RunnerServicePlatform::LinuxSystemSystemd => Ok(PathBuf::from("/etc/systemd/system")
-            .join(format!("{}.service", options.service_name))),
-        RunnerServicePlatform::WindowsService => Err(
-            "RUNNER_SERVICE_OUTPUT_REQUIRED: Windows service mode uses generated PowerShell scripts"
-                .to_string(),
-        ),
+        RunnerServicePlatform::LinuxSystemSystemd => {
+            Ok(PathBuf::from("/etc/systemd/system")
+                .join(format!("{}.service", options.service_name)))
+        }
     }
 }
 
 fn service_install_commands(options: &RunnerServiceOptions) -> Result<Vec<ServiceCommand>, String> {
     match options.platform {
+        RunnerServicePlatform::MacOsLaunchAgent => {
+            let path = default_service_install_path(options)?;
+            let domain = launchctl_user_domain();
+            Ok(vec![
+                ServiceCommand {
+                    program: "launchctl".to_string(),
+                    args: vec![
+                        "bootstrap".to_string(),
+                        domain.clone(),
+                        path.display().to_string(),
+                    ],
+                },
+                ServiceCommand {
+                    program: "launchctl".to_string(),
+                    args: vec![
+                        "kickstart".to_string(),
+                        "-k".to_string(),
+                        format!("{}/{}", domain, options.service_name),
+                    ],
+                },
+            ])
+        }
         RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => {
             Ok(vec![
                 systemctl_command(options.platform, &["daemon-reload"]),
@@ -2925,12 +6901,88 @@ fn service_install_commands(options: &RunnerServiceOptions) -> Result<Vec<Servic
                 ),
             ])
         }
-        RunnerServicePlatform::WindowsService => {
-            let manifest = options
-                .spec()
-                .render(RunnerServicePlatform::WindowsService)
-                .map_err(format_core_error)?;
-            Ok(vec![powershell_command(&manifest.content)])
+    }
+}
+
+fn service_deferred_install_commands(
+    options: &RunnerServiceOptions,
+) -> Result<Vec<ServiceCommand>, String> {
+    match options.platform {
+        // A LaunchAgent is registered atomically when the later start action
+        // bootstraps its already-written plist.
+        RunnerServicePlatform::MacOsLaunchAgent => Ok(Vec::new()),
+        RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => Ok(
+            vec![systemctl_command(options.platform, &["daemon-reload"])],
+        ),
+    }
+}
+
+fn service_compensation_quiesce_commands(
+    options: &RunnerServiceOptions,
+    active: bool,
+    enabled: bool,
+) -> Result<Vec<ServiceCommand>, String> {
+    match options.platform {
+        RunnerServicePlatform::MacOsLaunchAgent => {
+            if active {
+                plugin_service_control_commands(options, "stop", true)
+            } else {
+                Ok(Vec::new())
+            }
+        }
+        RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => {
+            let unit = format!("{}.service", options.service_name);
+            let mut commands = Vec::new();
+            if active {
+                commands.push(systemctl_command(options.platform, &["stop", &unit]));
+            }
+            if enabled {
+                commands.push(systemctl_command(options.platform, &["disable", &unit]));
+            }
+            Ok(commands)
+        }
+    }
+}
+
+fn service_compensation_enablement_commands(
+    options: &RunnerServiceOptions,
+    installed: bool,
+    enabled: bool,
+) -> Result<Vec<ServiceCommand>, String> {
+    if !installed {
+        return Ok(Vec::new());
+    }
+    match options.platform {
+        RunnerServicePlatform::MacOsLaunchAgent => Ok(Vec::new()),
+        RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => {
+            Ok(vec![systemctl_command(
+                options.platform,
+                &[
+                    if enabled { "enable" } else { "disable" },
+                    &format!("{}.service", options.service_name),
+                ],
+            )])
+        }
+    }
+}
+
+fn service_compensation_activity_commands(
+    options: &RunnerServiceOptions,
+    installed: bool,
+    active: bool,
+) -> Result<Vec<ServiceCommand>, String> {
+    if !installed || !active {
+        return Ok(Vec::new());
+    }
+    match options.platform {
+        RunnerServicePlatform::MacOsLaunchAgent => {
+            plugin_service_control_commands(options, "start", false)
+        }
+        RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => {
+            Ok(vec![systemctl_command(
+                options.platform,
+                &["start", &format!("{}.service", options.service_name)],
+            )])
         }
     }
 }
@@ -2940,12 +6992,14 @@ fn service_install_is_artifact_only(options: &RunnerServiceOptions) -> bool {
         return false;
     };
     match options.platform {
+        RunnerServicePlatform::MacOsLaunchAgent => default_service_install_path(options)
+            .map(|path| path != *output_path)
+            .unwrap_or(true),
         RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => {
             default_service_install_path(options)
                 .map(|path| path != *output_path)
                 .unwrap_or(true)
         }
-        RunnerServicePlatform::WindowsService => true,
     }
 }
 
@@ -2953,6 +7007,13 @@ fn service_uninstall_commands(
     options: &RunnerServiceOptions,
 ) -> Result<Vec<ServiceCommand>, String> {
     match options.platform {
+        RunnerServicePlatform::MacOsLaunchAgent => Ok(vec![ServiceCommand {
+            program: "launchctl".to_string(),
+            args: vec![
+                "bootout".to_string(),
+                format!("{}/{}", launchctl_user_domain(), options.service_name),
+            ],
+        }]),
         RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => {
             Ok(vec![
                 systemctl_command(
@@ -2966,20 +7027,18 @@ fn service_uninstall_commands(
                 systemctl_command(options.platform, &["daemon-reload"]),
             ])
         }
-        RunnerServicePlatform::WindowsService => {
-            let manifest = options
-                .spec()
-                .render(RunnerServicePlatform::WindowsService)
-                .map_err(format_core_error)?;
-            Ok(vec![powershell_command(
-                manifest.uninstall_content.as_deref().unwrap_or_default(),
-            )])
-        }
     }
 }
 
 fn service_status_commands(options: &RunnerServiceOptions) -> Result<Vec<ServiceCommand>, String> {
     match options.platform {
+        RunnerServicePlatform::MacOsLaunchAgent => Ok(vec![ServiceCommand {
+            program: "launchctl".to_string(),
+            args: vec![
+                "print".to_string(),
+                format!("{}/{}", launchctl_user_domain(), options.service_name),
+            ],
+        }]),
         RunnerServicePlatform::LinuxUserSystemd | RunnerServicePlatform::LinuxSystemSystemd => {
             Ok(vec![
                 systemctl_command(
@@ -2992,10 +7051,17 @@ fn service_status_commands(options: &RunnerServiceOptions) -> Result<Vec<Service
                 ),
             ])
         }
-        RunnerServicePlatform::WindowsService => Ok(vec![powershell_command(&format!(
-            "$Service = Get-Service -Name '{}' -ErrorAction SilentlyContinue; if ($Service) {{ $Service.Status; exit 0 }} else {{ exit 3 }}",
-            options.service_name.replace('\'', "''")
-        ))]),
+    }
+}
+
+fn launchctl_user_domain() -> String {
+    #[cfg(unix)]
+    {
+        format!("gui/{}", unsafe { libc::geteuid() })
+    }
+    #[cfg(not(unix))]
+    {
+        "gui/0".to_string()
     }
 }
 
@@ -3008,23 +7074,6 @@ fn systemctl_command(platform: RunnerServicePlatform, args: &[&str]) -> ServiceC
     ServiceCommand {
         program: "systemctl".to_string(),
         args: command_args,
-    }
-}
-
-fn powershell_command(script: &str) -> ServiceCommand {
-    ServiceCommand {
-        program: if cfg!(windows) {
-            "powershell.exe".to_string()
-        } else {
-            "pwsh".to_string()
-        },
-        args: vec![
-            "-NoProfile".to_string(),
-            "-ExecutionPolicy".to_string(),
-            "Bypass".to_string(),
-            "-Command".to_string(),
-            script.to_string(),
-        ],
     }
 }
 
@@ -3265,6 +7314,7 @@ fn run_bind(args: &[String], options: &GlobalOptions) -> Result<String, String> 
         .map_err(format_core_error)?;
     let store = SystemCredentialStore::new(credential_dir());
     let credential = load_credential(&store, &resolved.profile)?;
+    validate_runner_credential_compatibility(&credential)?;
     let mut client =
         HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())
             .map_err(format_core_error)?;
@@ -3281,6 +7331,7 @@ fn run_bind(args: &[String], options: &GlobalOptions) -> Result<String, String> 
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_bind_with<C: ManagementApiClient>(
     args: &[String],
     options: &GlobalOptions,
@@ -3467,6 +7518,7 @@ fn run_workflow(args: &[String], options: &GlobalOptions) -> Result<String, Stri
         .map_err(format_core_error)?;
     let store = SystemCredentialStore::new(credential_dir());
     let credential = load_credential(&store, &resolved.profile)?;
+    validate_runner_credential_compatibility(&credential)?;
     let mut client =
         HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())
             .map_err(format_core_error)?;
@@ -3852,7 +7904,7 @@ fn build_support_bundle(log_limit: usize) -> Result<Value, String> {
         .collect::<Vec<_>>();
     let connectivity = doctor
         .iter()
-        .filter(|check| matches!(check.name.as_str(), "server" | "grpc"))
+        .filter(|check| matches!(check.name.as_str(), "server" | "runnerControl"))
         .map(|check| {
             json!({
                 "name": check.name,
@@ -4923,8 +8975,8 @@ fn build_doctor_checks<C: ManagementApiClient>(
             "server reachability skipped because auth is unavailable",
         ));
         checks.push(DoctorCheck::warn(
-            "grpc",
-            "gRPC check skipped because auth is unavailable",
+            "runnerControl",
+            "runner-control transport check skipped because auth is unavailable",
         ));
         checks.push(workspace_doctor_check(
             workspace_override.or(resolved.workspace_path.as_deref()),
@@ -4957,7 +9009,9 @@ fn build_doctor_checks<C: ManagementApiClient>(
             format!("{}: {}", err.code, err.message),
         )),
     }
-    checks.push(grpc_doctor_check(resolved, credential, client, &read_env));
+    checks.push(runner_control_transport_doctor_check(
+        resolved, credential, client,
+    ));
     checks.push(workspace_doctor_check(
         workspace_override.or(resolved.workspace_path.as_deref()),
     ));
@@ -4992,10 +9046,10 @@ fn deep_doctor_checks(
     if proxy_vars.is_empty() {
         checks.push(DoctorCheck::ok("proxy", "no proxy environment detected"));
     } else {
-        checks.push(DoctorCheck::fail(
+        checks.push(DoctorCheck::warn(
             "proxy",
             format!(
-                "proxy environment detected ({}) and gRPC transport fails fast until proxy support is available",
+                "proxy environment detected ({}); ensure NO_PROXY includes the local runner-control endpoint",
                 proxy_vars.join(",")
             ),
         ));
@@ -5008,17 +9062,16 @@ fn deep_doctor_checks(
         ),
     ));
     checks.push(DoctorCheck::ok(
-        "transportFallback",
-        "WebSocket fallback is available for retryable gRPC transport failures",
+        "runnerControlMode",
+        "durable runner uses runner-control long-poll sessions and leased jobs",
     ));
     checks
 }
 
-fn grpc_doctor_check<C: ManagementApiClient>(
+fn runner_control_transport_doctor_check<C: ManagementApiClient>(
     resolved: &loomex_core::ResolvedCliSettings,
     credential: &ManagementCredential,
     client: &mut C,
-    read_env: &impl Fn(&str) -> Option<String>,
 ) -> DoctorCheck {
     let (Some(project_id), Some(runner_id), Some(binding_id)) = (
         resolved.project_id.as_deref(),
@@ -5026,56 +9079,109 @@ fn grpc_doctor_check<C: ManagementApiClient>(
         resolved.binding_id.as_deref(),
     ) else {
         return DoctorCheck::warn(
-            "grpc",
-            "gRPC check skipped until project, runner, and binding are selected",
+            "runnerControl",
+            "runner-control check skipped until project, runner, and binding are selected",
         );
     };
-    let request = StreamCredentialRequest {
-        organization_id: resolved
-            .organization_id
-            .clone()
-            .unwrap_or_else(|| credential.organization_id.clone()),
-        project_id: project_id.to_string(),
-        runner_id: runner_id.to_string(),
-        project_runner_binding_id: binding_id.to_string(),
-        runner_session_id: None,
-        protocol_version: PROTOCOL_VERSION.to_string(),
-        runner_version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    let credential_response = match client.issue_stream_credential(
-        credential,
-        &request,
-        &idempotency_key("doctor-stream-credential", binding_id),
-    ) {
+    let self_status = match client.get_runner_self_status(credential) {
         Ok(response) => response,
         Err(err) => {
-            return DoctorCheck::fail("grpc", format!("{}: {}", err.code, err.message));
+            return DoctorCheck::fail("runnerControl", format!("{}: {}", err.code, err.message));
         }
     };
-    let config = GrpcClientConfig {
-        endpoint: credential_response.grpc_endpoint.clone(),
-        ..GrpcClientConfig::default()
-    };
-    match validate_proxy_transport(&config, read_env) {
-        Ok(()) => DoctorCheck::ok(
-            "grpc",
-            format!("stream endpoint {}", credential_response.grpc_endpoint),
-        ),
-        Err(err) => DoctorCheck::fail("grpc", format!("{}: {}", err.code, err.message)),
+    let response_runner = self_status
+        .get("runner")
+        .and_then(|runner| runner.get("id"))
+        .and_then(Value::as_str);
+    if response_runner != Some(runner_id) {
+        return DoctorCheck::fail(
+            "runnerControl",
+            "RUNNER_IDENTITY_MISMATCH: authenticated runner does not match selected runnerId",
+        );
     }
+    let runner_status = self_status
+        .get("runner")
+        .and_then(|runner| runner.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if matches!(runner_status, "disabled" | "revoked") {
+        return DoctorCheck::fail(
+            "runnerControl",
+            format!("RUNNER_DISABLED: runner status is {runner_status}"),
+        );
+    }
+    let has_jobs_scope = self_status
+        .get("tokenScopes")
+        .and_then(Value::as_array)
+        .is_some_and(|scopes| {
+            scopes
+                .iter()
+                .any(|scope| scope.as_str() == Some("runner.jobs"))
+        });
+    if !has_jobs_scope {
+        return DoctorCheck::fail(
+            "runnerControl",
+            "AUTHORIZATION_FAILED: runner token must include runner.jobs scope",
+        );
+    }
+    DoctorCheck::ok(
+        "runnerControl",
+        format!(
+            "runner-control long-poll transport ready for project {project_id}, binding {binding_id}"
+        ),
+    )
 }
 
 fn workspace_doctor_check(workspace_path: Option<&str>) -> DoctorCheck {
     let Some(workspace_path) = workspace_path else {
         return DoctorCheck::warn("workspace", "no workspace selected");
     };
-    match validate_workspace_path(workspace_path) {
+    match inspect_workspace_path_without_mutation(workspace_path) {
         Ok(workspace) => DoctorCheck::ok(
             "workspace",
-            format!("read/write ok {}", workspace.display_path),
+            format!("read/write access ok {}", workspace.display()),
         ),
         Err(err) => DoctorCheck::fail("workspace", err),
     }
+}
+
+fn inspect_workspace_path_without_mutation(path: &str) -> Result<PathBuf, String> {
+    let input = PathBuf::from(path);
+    let metadata =
+        fs::symlink_metadata(&input).map_err(|error| format!("WORKSPACE_PATH_INVALID: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(
+            "WORKSPACE_PATH_INVALID: workspace must be a non-symlink directory".to_string(),
+        );
+    }
+    let canonical = input
+        .canonicalize()
+        .map_err(|error| format!("WORKSPACE_PATH_INVALID: {error}"))?;
+    if canonical.parent().is_none() {
+        return Err("WORKSPACE_PATH_UNSAFE: refusing to inspect filesystem root".to_string());
+    }
+    fs::read_dir(&canonical).map_err(|error| format!("WORKSPACE_READ_FAILED: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let path = CString::new(canonical.as_os_str().as_bytes())
+            .map_err(|_| "WORKSPACE_PATH_INVALID: path contains a NUL byte".to_string())?;
+        if unsafe { libc::access(path.as_ptr(), libc::R_OK | libc::W_OK | libc::X_OK) } != 0 {
+            return Err(format!(
+                "WORKSPACE_ACCESS_FAILED: {}",
+                io::Error::last_os_error()
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    if fs::metadata(&canonical)
+        .map(|metadata| metadata.permissions().readonly())
+        .unwrap_or(true)
+    {
+        return Err("WORKSPACE_ACCESS_FAILED: workspace is read-only".to_string());
+    }
+    Ok(canonical)
 }
 
 fn command_available_check(name: &str, args: &[&str]) -> DoctorCheck {
@@ -5476,10 +9582,10 @@ usage:
 
 const RUNNER_SERVICE_HELP: &str = "\
 usage:
-  loomex runner service unit --platform linux-user|linux-system|windows
-  loomex runner service install [--platform linux-user|linux-system|windows] [--output PATH] [--dry-run]
-  loomex runner service uninstall [--platform linux-user|linux-system|windows] [--dry-run]
-  loomex runner service status [--platform linux-user|linux-system|windows]
+  loomex runner service unit --platform macos|linux-user|linux-system
+  loomex runner service install [--platform macos|linux-user|linux-system] [--output PATH] [--dry-run]
+  loomex runner service uninstall [--platform macos|linux-user|linux-system] [--dry-run]
+  loomex runner service status [--platform macos|linux-user|linux-system]
   loomex runner service run [--config PATH] [--profile NAME] [--log-path PATH] [--once]";
 
 const RUNNER_RELEASE_HELP: &str = "\
@@ -5536,6 +9642,263 @@ const TRACE_HELP: &str = "usage:\n  loomex trace export RUN_ID [--path LOG_PATH]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static PLUGIN_CONTROL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_plugin_auth_flow(server_url: &str) -> PluginAuthFlow {
+        PluginAuthFlow {
+            login_id: String::new(),
+            profile: "default".to_string(),
+            server_url: server_url.to_string(),
+            host_header: None,
+            challenge: DeviceLoginChallenge {
+                device_code: "device-secret".to_string(),
+                user_code: "ABCD-EFGH-JKLM".to_string(),
+                verification_uri: format!("{server_url}/api/v1/auth/device/verify"),
+                expires_in_seconds: 600,
+                interval_seconds: 5,
+            },
+            created_at_epoch_seconds: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn successful_plugin_auth_persists_custom_server_for_first_use() {
+        let config_path = temp_config_path("plugin-auth-custom-server");
+        let credential_root = temp_credential_dir("plugin-auth-custom-server");
+        let store = LocalCredentialStore::new(credential_root.clone());
+        CliConfig::default().save(&config_path).unwrap();
+        let flow = test_plugin_auth_flow("https://loomex.internal.example");
+
+        let result =
+            complete_plugin_auth_flow(&flow, token("user.jwt.custom-server"), &config_path, &store)
+                .unwrap();
+        let saved = CliConfig::load_or_default(&config_path).unwrap();
+        let resolved = saved
+            .resolve(CliConfigOverrides::default(), |_| None)
+            .unwrap();
+
+        assert_eq!(result["serverUrl"], "https://loomex.internal.example");
+        assert_eq!(resolved.server_url, "https://loomex.internal.example");
+        assert_eq!(
+            store.load("default.user").unwrap().unwrap().access_token,
+            "user.jwt.custom-server"
+        );
+        let _ = fs::remove_file(config_path);
+        let _ = fs::remove_dir_all(credential_root);
+    }
+
+    #[test]
+    fn concurrent_plugin_auth_starts_allocate_unique_create_new_files() {
+        let directory = temp_credential_dir("plugin-auth-concurrent-starts");
+        let workers = 32;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+        let handles = (0..workers)
+            .map(|_| {
+                let directory = directory.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut flow = test_plugin_auth_flow("https://loomex.example");
+                    barrier.wait();
+                    allocate_plugin_auth_flow_in(&directory, &mut flow).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let flows = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        let ids = flows
+            .iter()
+            .map(|flow| flow.login_id.clone())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(ids.len(), workers);
+        assert!(ids.iter().all(|id| {
+            id.len() == "login-".len() + 32
+                && id
+                    .strip_prefix("login-")
+                    .unwrap()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+        }));
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), workers);
+
+        let collision = test_plugin_auth_flow("https://loomex.example");
+        let mut collision = collision;
+        collision.login_id = flows[0].login_id.clone();
+        assert!(!try_create_plugin_auth_flow_file(&directory, &collision).unwrap());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn plugin_control_setup_status_works_before_daemon_or_runtime_exists() {
+        let _lock = PLUGIN_CONTROL_ENV_LOCK.lock().unwrap();
+        let runtime_root = env::temp_dir().join(format!(
+            "loomex-plugin-first-use-{}-{}",
+            process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_dir_all(&runtime_root);
+        let previous = env::var_os(loomex_core::RUNTIME_HOME_ENV);
+        env::set_var(loomex_core::RUNTIME_HOME_ENV, &runtime_root);
+
+        let output = run_runner_plugin_control(
+            &[
+                "setup.status".to_string(),
+                "--params-json".to_string(),
+                "{}".to_string(),
+            ],
+            &GlobalOptions {
+                json: true,
+                non_interactive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        match previous {
+            Some(value) => env::set_var(loomex_core::RUNTIME_HOME_ENV, value),
+            None => env::remove_var(loomex_core::RUNTIME_HOME_ENV),
+        }
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(PLUGIN_CONTROL_SCHEMA_VERSION, parsed["schemaVersion"]);
+        assert_eq!("setup.status", parsed["method"]);
+        assert_eq!(false, parsed["result"]["installed"]);
+        assert!(parsed["result"]["service"].is_object());
+        let _ = fs::remove_dir_all(runtime_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_setup_transaction_lock_rejects_a_concurrent_mutation() {
+        let lifecycle_root = env::temp_dir().join(format!(
+            "loomex-plugin-setup-lock-{}-{}",
+            process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_dir_all(&lifecycle_root);
+
+        let first =
+            PluginSetupTransactionLock::acquire_at_with_attempts(&lifecycle_root, 1).unwrap();
+        let error =
+            PluginSetupTransactionLock::acquire_at_with_attempts(&lifecycle_root, 1).unwrap_err();
+        assert!(error.contains("PLUGIN_SETUP_BUSY"));
+        drop(first);
+        PluginSetupTransactionLock::acquire_at_with_attempts(&lifecycle_root, 1).unwrap();
+
+        let _ = fs::remove_dir_all(lifecycle_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_setup_lock_rejects_permissive_or_symlinked_preexisting_paths() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = temp_credential_dir("unsafe-lifecycle-lock");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = PluginSetupTransactionLock::acquire_at_with_attempts(&root, 1).unwrap_err();
+        assert!(error.contains("PLUGIN_SETUP_LOCK_PERMISSIONS_UNSAFE"));
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let lock_path = root.join(".setup.lock");
+        fs::write(&lock_path, b"lock").unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let error = PluginSetupTransactionLock::acquire_at_with_attempts(&root, 1).unwrap_err();
+        assert!(error.contains("PLUGIN_SETUP_LOCK_PERMISSIONS_UNSAFE"));
+
+        fs::remove_file(&lock_path).unwrap();
+        let victim = root.join("victim");
+        fs::write(&victim, b"victim").unwrap();
+        symlink(&victim, &lock_path).unwrap();
+        let error = PluginSetupTransactionLock::acquire_at_with_attempts(&root, 1).unwrap_err();
+        assert!(error.contains("PLUGIN_SETUP_LOCK_OPEN_FAILED"));
+        assert_eq!(b"victim", fs::read(&victim).unwrap().as_slice());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fallback_runner_status_keeps_daemon_parity_for_runtime_service_and_telemetry() {
+        let status = plugin_runner_status_value(
+            json!({
+                "installed": true,
+                "runtime": {"version": "1.2.3"},
+                "service": {"installed": true, "enabled": true, "active": false},
+            }),
+            json!({"authenticated": true}),
+            json!({"healthy": false, "status": "inactive"}),
+        );
+
+        assert_eq!(status["runtimeVersion"], "1.2.3");
+        assert_eq!(status["service"]["enabled"], true);
+        assert_eq!(status["health"]["healthy"], false);
+        assert_eq!(status["queue"]["available"], false);
+        assert_eq!(status["activeExecutions"]["available"], false);
+        assert_eq!(status["updateHealth"]["status"], "unknown");
+        assert_eq!(status["running"], false);
+    }
+
+    #[test]
+    fn plugin_control_requires_machine_readable_noninteractive_mode() {
+        let error =
+            run_runner_plugin_control(&["setup.status".to_string()], &GlobalOptions::default())
+                .unwrap_err();
+        assert!(error.starts_with("PLUGIN_CONTROL_MODE_REQUIRED:"));
+    }
+
+    #[test]
+    fn remote_logout_network_failure_is_reported_as_retryable_without_blocking_local_logout() {
+        let outcome = plugin_remote_revocation_outcome(Err(
+            "MANAGEMENT_HTTP_FAILED: connection refused".to_string(),
+        ));
+        let finalized = plugin_finalize_logout_result(
+            json!({"localCredentialRemoved": true, "serverRevokeAttempted": false}),
+            json!({"localLoggedOut": true}),
+            outcome.clone(),
+        );
+
+        assert_eq!(outcome["revoked"], false);
+        assert_eq!(outcome["retryRequired"], true);
+        assert!(outcome["warning"]
+            .as_str()
+            .unwrap()
+            .contains("connection refused"));
+        assert_eq!(finalized["localCredentialRemoved"], true);
+        assert_eq!(finalized["serverRevokeAttempted"], true);
+        assert_eq!(finalized["serverRevokeSucceeded"], false);
+        assert_eq!(finalized["lifecycle"]["localLoggedOut"], true);
+    }
+
+    #[test]
+    fn plugin_logout_success_reports_remote_and_local_completion_consistently() {
+        let finalized = plugin_finalize_logout_result(
+            json!({"localCredentialRemoved": true, "serverRevokeAttempted": false}),
+            json!({"localLoggedOut": true, "localControlInvalidated": true}),
+            json!({"revoked": true}),
+        );
+
+        assert_eq!(finalized["serverRevokeAttempted"], true);
+        assert_eq!(finalized["serverRevokeSucceeded"], true);
+        assert_eq!(finalized["remoteTokenRevocation"]["revoked"], true);
+        assert_eq!(finalized["lifecycle"]["localLoggedOut"], true);
+    }
+
+    #[test]
+    fn local_control_invalidation_removes_socket_and_token_idempotently() {
+        let root = env::temp_dir().join(format!("lx-invalidate-{}", process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let paths = LocalControlPaths::for_runtime_dir(&root);
+        loomex_core::prepare_local_control_paths(&paths).unwrap();
+        fs::write(&paths.socket_path, b"stale socket placeholder").unwrap();
+
+        plugin_invalidate_local_control_files_at(&paths).unwrap();
+        plugin_invalidate_local_control_files_at(&paths).unwrap();
+
+        assert!(!paths.socket_path.exists());
+        assert!(!paths.token_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
     use std::{cell::Cell, rc::Rc};
 
     use loomex_core::{
@@ -5595,6 +9958,26 @@ mod tests {
                 stdout: "active".to_string(),
                 stderr: String::new(),
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct InactiveEnabledServiceCommandRunner {
+        commands: Vec<ServiceCommand>,
+    }
+
+    impl ServiceCommandRunner for InactiveEnabledServiceCommandRunner {
+        fn run(&mut self, command: &ServiceCommand) -> Result<ServiceCommandOutput, String> {
+            self.commands.push(command.clone());
+            if self.commands.len() == 1 {
+                Err("service is inactive".to_string())
+            } else {
+                Ok(ServiceCommandOutput {
+                    success: true,
+                    stdout: "enabled".to_string(),
+                    stderr: String::new(),
+                })
+            }
         }
     }
 
@@ -5720,7 +10103,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!("loomex.localhost", value);
-        assert!(saved.starts_with("configVersion = 1\n"));
+        assert!(saved.starts_with("configVersion = 2\n"));
         assert!(list.contains("profiles.dev.serverUrl=http://127.0.0.1:28080"));
         assert!(!list.to_lowercase().contains("token"));
     }
@@ -6011,8 +10394,8 @@ mod tests {
     }
 
     #[test]
-    fn runner_service_windows_unit_generates_install_and_uninstall_scripts() {
-        let output = run_runner_service(
+    fn runner_service_windows_is_explicitly_unsupported() {
+        let error = run_runner_service(
             &[
                 "unit".to_string(),
                 "--platform".to_string(),
@@ -6031,21 +10414,14 @@ mod tests {
                 ..Default::default()
             },
         )
-        .unwrap();
-        let parsed: Value = serde_json::from_str(&output).unwrap();
-        let manifest = parsed["manifest"].as_str().unwrap();
-        let uninstall = parsed["uninstallManifest"].as_str().unwrap();
-
-        assert_eq!("windows", parsed["platform"]);
-        assert!(manifest.contains("New-Service"));
-        assert!(manifest.contains("runner service run --config"));
-        assert!(manifest.contains("\r\n"));
-        assert!(uninstall.contains("sc.exe delete"));
+        .unwrap_err();
+        assert!(error.starts_with("RUNNER_SERVICE_PLATFORM_UNSUPPORTED:"));
     }
 
     #[test]
     fn runner_service_run_once_uses_shared_runtime_guard() {
         let config_path = temp_config_path("service-run-once");
+        let log_path = temp_config_path("service-run-once-log");
         let credential_root = temp_credential_dir("service-run-once");
         let store = LocalCredentialStore::new(credential_root.clone());
         let binding_id = format!("binding_service_run_once_{}", process::id());
@@ -6082,6 +10458,8 @@ mod tests {
                 "--config".to_string(),
                 config_path.to_string_lossy().to_string(),
                 "--once".to_string(),
+                "--log-path".to_string(),
+                log_path.to_string_lossy().to_string(),
             ],
             &GlobalOptions {
                 json: true,
@@ -6094,12 +10472,32 @@ mod tests {
         .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         let _ = fs::remove_file(&config_path);
+        let log_entries = read_recent_log_entries(&log_path, 10).unwrap();
+        let tailed = LocalControlDispatcher::new(
+            FakeManagementClient::default(),
+            service_credential.clone(),
+        )
+        .with_context(None, None, None, None, Some(log_path.clone()))
+        .dispatch("logs.tail", &json!({"limit": 10}))
+        .unwrap();
+        let _ = fs::remove_file(&log_path);
         let _ = fs::remove_dir_all(&credential_root);
 
         assert_eq!("loomex.cli.runnerServiceRun/v1", parsed["schemaVersion"]);
         assert_eq!(binding_id, parsed["bindingId"]);
         assert_eq!("runner_control_long_poll", parsed["transport"]);
         assert_eq!("idle", parsed["event"]);
+        assert!(log_entries
+            .iter()
+            .any(|entry| entry.event_type == "runner.service.starting"));
+        assert!(log_entries
+            .iter()
+            .any(|entry| entry.event_type == "runner.service.tick"));
+        assert!(tailed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["event_type"] == "runner.service.tick"));
         assert_eq!(
             guard_path,
             PathBuf::from(parsed["guardPath"].as_str().unwrap())
@@ -6110,6 +10508,7 @@ mod tests {
     #[test]
     fn runner_service_run_once_writes_leased_file_job_to_workspace() {
         let config_path = temp_config_path("service-run-file-job");
+        let log_path = temp_config_path("service-run-file-job-log");
         let credential_root = temp_credential_dir("service-run-file-job");
         let workspace = temp_workspace_path("service-run-file-job");
         fs::create_dir_all(&workspace).unwrap();
@@ -6147,6 +10546,15 @@ mod tests {
         let mut client = FakeManagementClient {
             runner_jobs: vec![json!({
                 "id": "job_123",
+                "status": "leased",
+                "sessionId": "session_123",
+                "runnerId": "runner_123",
+                "attemptCount": 1,
+                "leaseVersion": 1,
+                "leasedUntilEpochMs": 4_102_444_800_000_u64,
+                "payloadDigest": "sha256:test-file-write",
+                "replaySafe": false,
+                "idempotencyKey": "runner-job:job_123",
                 "kind": "file.write_many",
                 "payload": {
                     "files": [{
@@ -6165,6 +10573,8 @@ mod tests {
                 "--config".to_string(),
                 config_path.to_string_lossy().to_string(),
                 "--once".to_string(),
+                "--log-path".to_string(),
+                log_path.to_string_lossy().to_string(),
             ],
             &GlobalOptions {
                 json: true,
@@ -6189,6 +10599,7 @@ mod tests {
         );
 
         let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_file(&log_path);
         let _ = fs::remove_dir_all(&credential_root);
         let _ = fs::remove_dir_all(&workspace);
     }
@@ -6201,11 +10612,9 @@ mod tests {
             .join("systemd")
             .join("user")
             .join("loomex-runner.service");
-        let previous_home = env::var("HOME").ok();
-        env::set_var("HOME", &home);
         let mut runner = TestServiceCommandRunner::default();
 
-        let output = run_runner_service_install_with_runner(
+        let output = run_runner_service_install_with_runner_and_path(
             &[
                 "--platform".to_string(),
                 "linux-user".to_string(),
@@ -6213,23 +10622,17 @@ mod tests {
                 "/usr/local/bin/loomex".to_string(),
                 "--config".to_string(),
                 "/tmp/loomex-config.toml".to_string(),
-                "--output".to_string(),
-                output_path.to_string_lossy().to_string(),
             ],
             &GlobalOptions {
                 json: true,
                 ..Default::default()
             },
             &mut runner,
+            Some(&output_path),
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         let unit = fs::read_to_string(&output_path).unwrap();
-        if let Some(previous_home) = previous_home {
-            env::set_var("HOME", previous_home);
-        } else {
-            env::remove_var("HOME");
-        }
         let _ = fs::remove_dir_all(&home);
 
         assert!(unit.contains("ExecStart=\"/usr/local/bin/loomex\" runner service run"));
@@ -6276,6 +10679,105 @@ mod tests {
         assert_eq!(0, parsed["commands"].as_array().unwrap().len());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn service_unit_write_rejects_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_credential_dir("service-unit-symlink");
+        prepare_private_test_directory(&root);
+        let victim = root.join("victim.txt");
+        let service_path = root.join("loomex-runner.service");
+        fs::write(&victim, "do not replace").unwrap();
+        symlink(&victim, &service_path).unwrap();
+
+        let error = write_service_file(&service_path, "malicious replacement").unwrap_err();
+
+        assert!(error.starts_with("RUNNER_SERVICE_PATH_UNSAFE:"));
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "do not replace");
+        assert!(fs::symlink_metadata(&service_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn service_unit_write_atomically_replaces_regular_file() {
+        let root = temp_credential_dir("service-unit-atomic-replace");
+        prepare_private_test_directory(&root);
+        let service_path = root.join("loomex-runner.service");
+        fs::write(&service_path, "old").unwrap();
+
+        write_service_file(&service_path, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&service_path).unwrap(), "new");
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp-")
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runner_service_install_can_write_unit_without_starting_before_bootstrap() {
+        let home = temp_credential_dir("service-install-deferred");
+        let output_path = home
+            .join(".config")
+            .join("systemd")
+            .join("user")
+            .join("loomex-runner.service");
+        let mut runner = TestServiceCommandRunner::default();
+
+        let output = run_runner_service_install_with_runner_and_path(
+            &[
+                "--platform".to_string(),
+                "linux-user".to_string(),
+                "--binary".to_string(),
+                "/usr/local/bin/loomex".to_string(),
+                "--config".to_string(),
+                "/tmp/loomex-config.toml".to_string(),
+                "--defer-start".to_string(),
+            ],
+            &GlobalOptions {
+                json: true,
+                ..Default::default()
+            },
+            &mut runner,
+            Some(&output_path),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+
+        assert!(output_path.exists());
+        assert_eq!(1, runner.commands.len());
+        assert_eq!(vec!["--user", "daemon-reload"], runner.commands[0].args);
+        assert_eq!(parsed["deferredStart"], true);
+        assert_eq!(parsed["artifactOnly"], false);
+        let service_options = RunnerServiceOptions::parse(
+            &[
+                "--platform".to_string(),
+                "linux-user".to_string(),
+                "--binary".to_string(),
+                "/usr/local/bin/loomex".to_string(),
+                "--config".to_string(),
+                "/tmp/loomex-config.toml".to_string(),
+            ],
+            &GlobalOptions::default(),
+        )
+        .unwrap();
+        let activation = plugin_service_control_commands(&service_options, "start", false).unwrap();
+        assert_eq!(1, activation.len());
+        assert_eq!(
+            vec!["--user", "enable", "--now", "loomex-runner.service"],
+            activation[0].args
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
     #[test]
     fn runner_service_status_uses_systemctl_not_file_existence() {
         let mut runner = TestServiceCommandRunner::default();
@@ -6308,6 +10810,99 @@ mod tests {
             runner.commands[1].args
         );
         assert_eq!(true, parsed["installed"]);
+        assert_eq!(true, parsed["active"]);
+        assert_eq!(true, parsed["enabled"]);
+    }
+
+    #[test]
+    fn runner_service_status_does_not_report_enabled_but_stopped_as_active() {
+        let mut runner = InactiveEnabledServiceCommandRunner::default();
+
+        let output = run_runner_service_status_with_runner(
+            &[
+                "--platform".to_string(),
+                "linux-system".to_string(),
+                "--binary".to_string(),
+                "/usr/local/bin/loomex".to_string(),
+                "--config".to_string(),
+                "/tmp/loomex-config.toml".to_string(),
+            ],
+            &GlobalOptions {
+                json: true,
+                ..Default::default()
+            },
+            &mut runner,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["installed"], true);
+        assert_eq!(parsed["enabled"], true);
+        assert_eq!(parsed["active"], false);
+    }
+
+    #[test]
+    fn macos_start_skips_bootstrap_when_launch_agent_is_already_loaded() {
+        let options = RunnerServiceOptions {
+            platform: RunnerServicePlatform::MacOsLaunchAgent,
+            service_name: "loomex-runner".to_string(),
+            binary_path: PathBuf::from("/usr/local/bin/loomex"),
+            config_path: PathBuf::from("/tmp/loomex.toml"),
+            profile: None,
+            log_path: None,
+            output_path: None,
+            uninstall_output_path: None,
+            dry_run: false,
+            once: false,
+            defer_start: false,
+        };
+
+        let loaded = plugin_service_control_commands(&options, "start", true).unwrap();
+        let unloaded = plugin_service_control_commands(&options, "start", false).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].args[0], "kickstart");
+        assert_eq!(unloaded.len(), 2);
+        assert_eq!(unloaded[0].args[0], "bootstrap");
+        assert_eq!(unloaded[1].args[0], "kickstart");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_health_check_requires_a_real_authenticated_ipc_ping() {
+        use std::os::unix::net::UnixListener;
+
+        let root = env::temp_dir().join(format!("lx-health-{}", process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let paths = LocalControlPaths::for_runtime_dir(&root);
+        let expected_token = loomex_core::prepare_local_control_paths(&paths).unwrap();
+        let listener = UnixListener::bind(&paths.socket_path).unwrap();
+        let thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: LocalControlRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(request.auth_token, expected_token);
+            assert_eq!(request.method, "ping");
+            let mut stream = reader.into_inner();
+            serde_json::to_writer(
+                &mut stream,
+                &LocalControlResponse::success(
+                    request.id,
+                    json!({"pong": true, "protocolVersion": LOCAL_CONTROL_PROTOCOL_VERSION}),
+                ),
+            )
+            .unwrap();
+            stream.write_all(b"\n").unwrap();
+        });
+
+        let health = plugin_local_control_ping_once_at(&paths).unwrap();
+
+        assert_eq!(health["healthy"], true);
+        assert_eq!(health["protocolVersion"], LOCAL_CONTROL_PROTOCOL_VERSION);
+        thread.join().unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -6932,10 +11527,10 @@ mod tests {
 
         assert!(checks
             .iter()
-            .any(|check| check.name == "proxy" && check.status == "failed"));
+            .any(|check| check.name == "proxy" && check.status == "warning"));
         assert!(checks
             .iter()
-            .any(|check| check.name == "transportFallback" && check.status == "ok"));
+            .any(|check| check.name == "runnerControlMode" && check.status == "ok"));
     }
 
     #[test]
@@ -6944,7 +11539,7 @@ mod tests {
             DoctorCheck::ok("config", "ok"),
             DoctorCheck::ok("auth", "ok"),
             DoctorCheck::ok("server", "ok"),
-            DoctorCheck::ok("grpc", "ok"),
+            DoctorCheck::ok("runnerControl", "ok"),
             DoctorCheck::ok("workspace", "ok"),
             DoctorCheck::ok("git", "ok"),
             DoctorCheck::ok("shell", "ok"),
@@ -6965,7 +11560,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_auth_failure_skips_server_and_grpc() {
+    fn doctor_auth_failure_skips_server_and_runner_control() {
         let config = CliConfig::default();
         let resolved = config
             .resolve(CliConfigOverrides::default(), |_| None)
@@ -6987,7 +11582,7 @@ mod tests {
             .any(|check| check.name == "auth" && check.status == "failed"));
         assert!(checks
             .iter()
-            .any(|check| check.name == "grpc" && check.status == "warning"));
+            .any(|check| check.name == "runnerControl" && check.status == "warning"));
     }
 
     #[test]
@@ -6996,7 +11591,7 @@ mod tests {
             DoctorCheck::ok("config", "ok"),
             DoctorCheck::fail("auth", "AUTH_TOKEN_EXPIRED: expired"),
             DoctorCheck::warn("server", "skipped"),
-            DoctorCheck::warn("grpc", "skipped"),
+            DoctorCheck::warn("runnerControl", "skipped"),
         ];
         let output = format_doctor_checks(
             &checks,
@@ -7019,7 +11614,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_grpc_blocked_returns_failed_check() {
+    fn doctor_runner_control_scope_error_returns_failed_check_without_legacy_stream_call() {
         let mut config = CliConfig::default();
         config
             .set_key("profiles.default.organizationId", "org_123".to_string())
@@ -7038,27 +11633,64 @@ mod tests {
             .unwrap();
         let credential = credential("default", "org_123");
         let mut client = FakeManagementClient {
-            stream_credential_error: Some(loomex_core::CoreError::new(
-                "RUNNER_STREAM_UNAVAILABLE",
-                "proxy blocked",
+            runner_self_error: Some(loomex_core::CoreError::new(
+                "AUTHORIZATION_FAILED",
+                "Runner token must include runner.read scope",
             )),
             ..Default::default()
         };
 
-        let check = grpc_doctor_check(&resolved, &credential, &mut client, &|_| None);
+        let check = runner_control_transport_doctor_check(&resolved, &credential, &mut client);
 
-        assert_eq!("grpc", check.name);
+        assert_eq!("runnerControl", check.name);
         assert_eq!("failed", check.status);
-        assert!(check.message.contains("RUNNER_STREAM_UNAVAILABLE"));
+        assert!(check.message.contains("AUTHORIZATION_FAILED"));
+        assert!(check.message.contains("runner.read scope"));
+        assert_eq!(0, client.stream_credential_issue_count);
     }
 
     #[test]
-    fn doctor_json_grpc_failure_maps_to_nonzero_exit_without_losing_schema() {
+    fn doctor_runner_control_transport_requires_jobs_scope() {
+        let mut config = CliConfig::default();
+        for (key, value) in [
+            ("organizationId", "org_123"),
+            ("projectId", "prj_123"),
+            ("runnerId", "runner_123"),
+            ("bindingId", "binding_123"),
+        ] {
+            config
+                .set_key(&format!("profiles.default.{key}"), value.to_string())
+                .unwrap();
+        }
+        let resolved = config
+            .resolve(CliConfigOverrides::default(), |_| None)
+            .unwrap();
+        let credential = credential("default", "org_123");
+        let mut client = FakeManagementClient {
+            runner_self_status: Some(json!({
+                "runner": {"id": "runner_123", "status": "online"},
+                "tokenScopes": ["runner.read"],
+            })),
+            ..Default::default()
+        };
+
+        let check = runner_control_transport_doctor_check(&resolved, &credential, &mut client);
+
+        assert_eq!("failed", check.status);
+        assert!(check.message.contains("runner.jobs scope"));
+        assert_eq!(0, client.stream_credential_issue_count);
+    }
+
+    #[test]
+    fn doctor_json_runner_control_failure_maps_to_nonzero_exit_without_losing_schema() {
         let checks = vec![
             DoctorCheck::ok("config", "ok"),
             DoctorCheck::ok("auth", "ok"),
             DoctorCheck::ok("server", "ok"),
-            DoctorCheck::fail("grpc", "RUNNER_STREAM_UNAVAILABLE: proxy blocked"),
+            DoctorCheck::fail(
+                "runnerControl",
+                "RUNNER_CONTROL_UNAVAILABLE: backend unavailable",
+            ),
         ];
         let output = format_doctor_checks(
             &checks,
@@ -7086,7 +11718,7 @@ mod tests {
             DoctorCheck::ok("config", "ok"),
             DoctorCheck::ok("auth", "ok"),
             DoctorCheck::ok("server", "ok"),
-            DoctorCheck::ok("grpc", "ok"),
+            DoctorCheck::ok("runnerControl", "ok"),
             DoctorCheck::fail("shell", "sh unavailable: not found"),
         ];
         let output = format_doctor_checks(
@@ -7340,17 +11972,80 @@ mod tests {
             |_| {},
         )
         .unwrap();
-        let saved = store.load("default").unwrap().unwrap();
+        let saved = store.load("default.user").unwrap().unwrap();
         let saved_config = CliConfig::load_or_default(&config_path).unwrap();
         let _ = std::fs::remove_file(&config_path);
         let _ = std::fs::remove_dir_all(&credential_root);
 
         assert_eq!("device_management_secret", saved.access_token);
+        assert!(store.load("default").unwrap().is_none());
         assert_eq!(
             Some("org_123".to_string()),
             saved_config.profiles["default"].organization_id
         );
         assert!(!output.contains("device_management_secret"));
+    }
+
+    #[test]
+    fn runner_credential_schema_marker_requires_legacy_reauthentication() {
+        let legacy = credential("default", "org_123");
+        let current = ManagementCredential::from_runner_token_response(
+            "default",
+            "org_123",
+            token("opaque-runner-token"),
+            CredentialStorageBackend::LocalFileFallback,
+        )
+        .unwrap();
+
+        assert!(runner_credential_upgrade_reason(&legacy).is_some());
+        assert!(runner_credential_upgrade_reason(&current).is_none());
+        assert!(validate_runner_credential_compatibility(&legacy)
+            .unwrap_err()
+            .contains("RUNNER_CREDENTIAL_UPGRADE_REQUIRED"));
+        let (ready, reason) = runner_credential_local_readiness(Some(&legacy), 0);
+        assert!(!ready);
+        assert_eq!(Some(RUNNER_REAUTH_GUIDANCE), reason);
+    }
+
+    #[test]
+    fn selected_project_bootstraps_separate_runner_credential() {
+        let config_path = temp_config_path("project-runner-bootstrap");
+        let credential_root = temp_credential_dir("project-runner-bootstrap");
+        let store = LocalCredentialStore::new(credential_root.clone());
+        let user_credential = ManagementCredential::from_user_token_response(
+            "default.user",
+            "org_123",
+            token("signed-user-token"),
+            CredentialStorageBackend::LocalFileFallback,
+        )
+        .unwrap();
+        store.save(&user_credential).unwrap();
+        let mut config = CliConfig::default();
+        let mut client = FakeManagementClient::default();
+
+        bootstrap_cli_runner_for_project(
+            &mut config,
+            &config_path,
+            &store,
+            &user_credential,
+            &mut client,
+            "default",
+            "org_123",
+            "prj_123",
+            CredentialStorageBackend::LocalFileFallback,
+        )
+        .unwrap();
+
+        let runner = store.load("default").unwrap().unwrap();
+        assert_eq!(CredentialKind::RunnerControlV1, runner.kind);
+        assert_eq!("lmxrt_runner_secret", runner.access_token);
+        assert_eq!(1, client.bootstrap_call_count);
+        assert_eq!(
+            Some("runner_123".to_string()),
+            config.profiles["default"].runner_id
+        );
+        let _ = fs::remove_file(config_path);
+        let _ = fs::remove_dir_all(credential_root);
     }
 
     #[test]
@@ -7760,6 +12455,126 @@ mod tests {
                 .as_ref()
                 .map(|request| request.local_root_path.clone())
         );
+    }
+
+    #[test]
+    fn plugin_binding_bootstraps_runner_token_before_runner_control_call() {
+        let config_path = temp_config_path("plugin-binding-bootstrap");
+        let credential_root = temp_credential_dir("plugin-binding-bootstrap");
+        let workspace = temp_workspace_path("plugin-binding-bootstrap");
+        fs::create_dir_all(&workspace).unwrap();
+        let store = LocalCredentialStore::new(credential_root.clone());
+        let user_credential = ManagementCredential::from_user_token_response(
+            "default.user",
+            "org_123",
+            AuthTokenResponse {
+                access_token: "user.jwt".to_string(),
+                refresh_token: None,
+                token_type: "Bearer".to_string(),
+                expires_at: "9999-12-31T23:59:59Z".to_string(),
+            },
+            CredentialStorageBackend::LocalFileFallback,
+        )
+        .unwrap();
+        store.save(&user_credential).unwrap();
+        let mut config = CliConfig::default();
+        let mut client = FakeManagementClient {
+            project: Some(Project {
+                id: "prj_123".to_string(),
+                organization_id: "org_123".to_string(),
+                name: "Demo".to_string(),
+                status: "active".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let result = create_plugin_binding_with(
+            "prj_123",
+            &workspace.to_string_lossy(),
+            "default",
+            &mut config,
+            &config_path,
+            &store,
+            &user_credential,
+            &mut client,
+        )
+        .unwrap();
+        let repeated = create_plugin_binding_with(
+            "prj_123",
+            &workspace.to_string_lossy(),
+            "default",
+            &mut config,
+            &config_path,
+            &store,
+            &user_credential,
+            &mut client,
+        )
+        .unwrap();
+        let saved_runner_credential = store.load("default").unwrap().unwrap();
+        let saved_config = CliConfig::load_or_default(&config_path).unwrap();
+
+        assert_eq!(client.bootstrap_call_count, 1);
+        assert_eq!(client.upsert_call_count, 0);
+        assert_eq!(client.binding_create_count, 1);
+        assert_eq!(
+            client.last_bootstrap_access_token.as_deref(),
+            Some("user.jwt")
+        );
+        assert_eq!(
+            client.last_binding_access_token.as_deref(),
+            Some("lmxrt_runner_secret")
+        );
+        assert_eq!(saved_runner_credential.access_token, "lmxrt_runner_secret");
+        assert_eq!(
+            store.load("default.user").unwrap().unwrap().access_token,
+            "user.jwt"
+        );
+        assert_eq!(result["binding"]["id"], "binding_123");
+        assert_eq!(result["bootstrapped"], true);
+        assert_eq!(result["reused"], false);
+        assert_eq!(repeated["bootstrapped"], false);
+        assert_eq!(repeated["reused"], true);
+        assert_eq!(
+            saved_config.profiles["default"].binding_id.as_deref(),
+            Some("binding_123")
+        );
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_dir_all(&credential_root);
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn project_and_organization_switch_clear_stale_runner_scope() {
+        let mut project_switch = CliConfig::default();
+        for (key, value) in [
+            ("organizationId", "org_123"),
+            ("projectId", "prj_old"),
+            ("runnerId", "runner_old"),
+            ("bindingId", "binding_old"),
+            ("workspacePath", "/tmp/old"),
+        ] {
+            project_switch
+                .set_key(&format!("profiles.default.{key}"), value.to_string())
+                .unwrap();
+        }
+
+        clear_plugin_runner_scope(&mut project_switch, "default", false).unwrap();
+
+        let profile = &project_switch.profiles["default"];
+        assert_eq!(profile.organization_id.as_deref(), Some("org_123"));
+        assert_eq!(profile.project_id.as_deref(), Some("prj_old"));
+        assert!(profile.runner_id.is_none());
+        assert!(profile.binding_id.is_none());
+        assert!(profile.workspace_path.is_none());
+
+        let mut organization_switch = project_switch;
+        clear_plugin_runner_scope(&mut organization_switch, "default", true).unwrap();
+        let profile = &organization_switch.profiles["default"];
+        assert_eq!(profile.organization_id.as_deref(), Some("org_123"));
+        assert!(profile.project_id.is_none());
+        assert!(profile.runner_id.is_none());
+        assert!(profile.binding_id.is_none());
+        assert!(profile.workspace_path.is_none());
     }
 
     #[test]
@@ -8509,7 +13324,7 @@ mod tests {
             "sbom": [{"name": "loomex-cli", "version": "0.1.0"}],
             "provenance": {
                 "builder_id": "github-actions:loomex-runner",
-                "source_repository": "https://github.com/loomex/loomex",
+                "source_repository": "https://github.com/loomex-app/runner",
                 "source_revision": "abcdef123456",
                 "build_started_at": "2026-06-29T00:00:00Z",
                 "build_finished_at": "2026-06-29T00:01:00Z",
@@ -8626,7 +13441,7 @@ mod tests {
             "sbom": [{"name": "loomex-cli", "version": "0.1.0"}],
             "provenance": {
                 "builder_id": "github-actions:loomex-runner",
-                "source_repository": "https://github.com/loomex/loomex",
+                "source_repository": "https://github.com/loomex-app/runner",
                 "source_revision": "abcdef123456",
                 "build_started_at": "2026-06-29T00:00:00Z",
                 "build_finished_at": "2026-06-29T00:01:00Z",
@@ -8692,7 +13507,7 @@ mod tests {
                 }],
                 provenance: loomex_core::BuildProvenance {
                     builder_id: "github-actions:loomex-runner".to_string(),
-                    source_repository: "https://github.com/loomex/loomex".to_string(),
+                    source_repository: "https://github.com/loomex-app/runner".to_string(),
                     source_revision: "abcdef123456".to_string(),
                     build_started_at: "2026-06-29T00:00:00Z".to_string(),
                     build_finished_at: "2026-06-29T00:01:00Z".to_string(),
@@ -9224,7 +14039,7 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct FakeManagementClient {
         device_challenge: Option<DeviceLoginChallenge>,
         device_token: Option<AuthTokenResponse>,
@@ -9237,6 +14052,8 @@ mod tests {
         project: Option<Project>,
         runner: Option<Runner>,
         current_runner_error: Option<loomex_core::CoreError>,
+        runner_self_status: Option<Value>,
+        runner_self_error: Option<loomex_core::CoreError>,
         binding: Option<ManagementProjectRunnerBinding>,
         bindings: Vec<ManagementProjectRunnerBinding>,
         stream_credential: Option<StreamCredentialResponse>,
@@ -9246,6 +14063,11 @@ mod tests {
         workflow_input_schema: Option<Value>,
         human_requests: Vec<HumanRequestSummary>,
         last_binding_request: Option<ProjectRunnerBindingCreateRequest>,
+        last_bootstrap_access_token: Option<String>,
+        last_binding_access_token: Option<String>,
+        bootstrap_call_count: usize,
+        upsert_call_count: usize,
+        binding_create_count: usize,
         last_workflow_request: Option<WorkflowRunStartRequest>,
         last_human_request_id: Option<String>,
         last_human_resolution: Option<Value>,
@@ -9329,12 +14151,25 @@ mod tests {
 
         fn bootstrap_runner_with_workspace_token(
             &mut self,
-            _workspace_token: &str,
-            _organization_id: &str,
-            _project_id: Option<&str>,
+            workspace_token: &str,
+            organization_id: &str,
+            project_id: Option<&str>,
             _workspace_root: Option<&str>,
         ) -> loomex_core::CoreResult<loomex_core::ApiKeyExchangeResult> {
-            Err(loomex_core::CoreError::new("TEST_UNIMPLEMENTED", "unused"))
+            self.bootstrap_call_count += 1;
+            self.last_bootstrap_access_token = Some(workspace_token.to_string());
+            Ok(loomex_core::ApiKeyExchangeResult {
+                token: AuthTokenResponse {
+                    access_token: "lmxrt_runner_secret".to_string(),
+                    refresh_token: None,
+                    token_type: "Bearer".to_string(),
+                    expires_at: "9999-12-31T23:59:59Z".to_string(),
+                },
+                organization_id: Some(organization_id.to_string()),
+                project_id: project_id.map(str::to_string),
+                runner_id: Some("runner_123".to_string()),
+                binding_id: None,
+            })
         }
 
         fn list_organizations(
@@ -9381,12 +14216,40 @@ mod tests {
             }))
         }
 
+        fn get_runner_self_status(
+            &mut self,
+            _credential: &ManagementCredential,
+        ) -> loomex_core::CoreResult<Value> {
+            if let Some(error) = self.runner_self_error.clone() {
+                return Err(error);
+            }
+            Ok(self.runner_self_status.clone().unwrap_or_else(|| {
+                let runner = self.runner.clone().unwrap_or_else(|| Runner {
+                    id: "runner_123".to_string(),
+                    organization_id: "org_123".to_string(),
+                    status: "online".to_string(),
+                    runner_version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    capabilities: default_runner_capabilities(),
+                });
+                json!({
+                    "runner": {
+                        "id": runner.id,
+                        "organizationId": runner.organization_id,
+                        "status": runner.status,
+                    },
+                    "tokenScopes": ["runner.read", "runner.jobs"],
+                })
+            }))
+        }
+
         fn upsert_current_runner(
             &mut self,
             _credential: &ManagementCredential,
             request: &RunnerUpsertRequest,
             _idempotency_key: &str,
         ) -> loomex_core::CoreResult<Runner> {
+            self.upsert_call_count += 1;
             Ok(self.runner.clone().unwrap_or_else(|| Runner {
                 id: "runner_123".to_string(),
                 organization_id: request.organization_id.clone(),
@@ -9399,13 +14262,15 @@ mod tests {
 
         fn create_project_runner_binding(
             &mut self,
-            _credential: &ManagementCredential,
+            credential: &ManagementCredential,
             project_id: &str,
             request: &ProjectRunnerBindingCreateRequest,
             _idempotency_key: &str,
         ) -> loomex_core::CoreResult<ManagementProjectRunnerBinding> {
+            self.binding_create_count += 1;
+            self.last_binding_access_token = Some(credential.access_token.clone());
             self.last_binding_request = Some(request.clone());
-            Ok(self
+            let binding = self
                 .binding
                 .clone()
                 .unwrap_or_else(|| ManagementProjectRunnerBinding {
@@ -9416,15 +14281,24 @@ mod tests {
                     local_root_path: request.local_root_path.clone(),
                     status: "active".to_string(),
                     local_root_fingerprint: request.local_root_fingerprint.clone(),
-                }))
+                });
+            if !self.bindings.iter().any(|item| item.id == binding.id) {
+                self.bindings.push(binding.clone());
+            }
+            Ok(binding)
         }
 
         fn list_project_runner_bindings(
             &mut self,
             _credential: &ManagementCredential,
-            _project_id: &str,
+            project_id: &str,
         ) -> loomex_core::CoreResult<Vec<ManagementProjectRunnerBinding>> {
-            Ok(self.bindings.clone())
+            Ok(self
+                .bindings
+                .iter()
+                .filter(|binding| binding.project_id == project_id)
+                .cloned()
+                .collect())
         }
 
         fn revoke_project_runner_binding(
@@ -9479,6 +14353,7 @@ mod tests {
         ) -> loomex_core::CoreResult<loomex_core::RunnerWorkflowExecutionListResponse> {
             Ok(loomex_core::RunnerWorkflowExecutionListResponse {
                 executions: Vec::new(),
+                next_cursor: None,
             })
         }
 
@@ -9489,10 +14364,15 @@ mod tests {
             _version: Option<&str>,
         ) -> loomex_core::CoreResult<loomex_core::RunnerWorkflowInputSchemaResponse> {
             Ok(loomex_core::RunnerWorkflowInputSchemaResponse {
+                workflow: None,
                 input_schema: None,
                 active_version: None,
                 selected_version: None,
                 versions: Vec::new(),
+                first_human_input: None,
+                nodes: Vec::new(),
+                capabilities: serde_json::Map::new(),
+                extra: serde_json::Map::new(),
             })
         }
 
@@ -9702,6 +14582,620 @@ mod tests {
         let _ = fs::remove_dir_all(workspace);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn runner_control_shell_job_honors_timeout_and_cancel() {
+        let workspace = temp_workspace_path("runner-shell-job");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+        let mut resolved = service_resolved_settings();
+        resolved.workspace_path = Some(workspace.display().to_string());
+
+        let timed_out = execute_runner_control_job_for_session(
+            &resolved,
+            "session-shell-timeout",
+            &json!({
+                "kind": "shell.exec",
+                "payload": {
+                    "command": ["sh", "-c", "sleep 2"],
+                    "timeout_seconds": 1,
+                    "max_output_bytes": 1024
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(timed_out["timedOut"], true);
+
+        let cancelled = execute_runner_control_job_for_session(
+            &resolved,
+            "session-shell-cancel",
+            &json!({
+                "kind": "shell.exec",
+                "cancelRequested": true,
+                "payload": {
+                    "command": ["sh", "-c", "sleep 2"],
+                    "timeout_seconds": 10,
+                    "max_output_bytes": 1024
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(cancelled["cancelled"], true);
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_control_active_dispatch_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace_path("runner-symlink-workspace");
+        let outside = temp_workspace_path("runner-symlink-outside");
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "outside").unwrap();
+        symlink(&outside, workspace.join("escape")).unwrap();
+        let mut resolved = service_resolved_settings();
+        resolved.workspace_path = Some(workspace.display().to_string());
+
+        let error = execute_runner_control_job_for_session(
+            &resolved,
+            "session-symlink",
+            &json!({
+                "kind": "fs.read",
+                "payload": {"path": "escape/secret.txt", "max_bytes": 100}
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("WORKSPACE_SYMLINK_ESCAPE")
+                || error.contains("POLICY_DENIED_OUTSIDE_WORKSPACE"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn plugin_setup_snapshot_captures_both_runtime_pointers() {
+        let root = temp_credential_dir("setup-pointer-snapshot");
+        let _ = fs::remove_dir_all(&root);
+        let installer = RuntimeInstaller::new(&root);
+        install_bundled_test_runtime(&installer, "0.9.0", b"runtime-0.9");
+        install_bundled_test_runtime(&installer, "1.0.0", b"runtime-1.0");
+
+        let (active, previous) = plugin_capture_runtime_pointer_state(&installer).unwrap();
+
+        assert_eq!(Some("1.0.0".to_string()), active);
+        assert_eq!(Some("0.9.0".to_string()), previous);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lifecycle_mutations_fail_closed_while_setup_recovery_is_pending() {
+        let root = temp_credential_dir("setup-pending-lifecycle");
+        let _ = fs::remove_dir_all(&root);
+        prepare_private_test_directory(&root);
+        let store = SetupTransactionStore::new(&root);
+        let snapshot = SetupTransactionSnapshot {
+            runtime_root: root.join("runtime-a"),
+            active_runtime_version: Some("1.0.0".to_string()),
+            previous_runtime_version: Some("0.9.0".to_string()),
+            config: FileSnapshot::capture(root.join("config.toml")).unwrap(),
+            service_file: FileSnapshot::capture(root.join("loomex.service")).unwrap(),
+            service_installed: false,
+            service_enabled: false,
+            service_active: false,
+        };
+        let mut journal = store
+            .begin(SetupTransactionOperation::Apply, snapshot)
+            .unwrap();
+
+        let error = plugin_reject_unfinished_setup_transaction_at(&store).unwrap_err();
+        assert!(error.starts_with("PLUGIN_SETUP_RECOVERY_REQUIRED:"));
+        assert!(store.load().unwrap().is_some());
+        for method in [
+            "auth.start",
+            "auth.wait",
+            "auth.logout",
+            "org.select",
+            "project.select",
+            "binding.create",
+            "binding.revoke",
+            "runner.control",
+        ] {
+            assert!(plugin_control_is_lifecycle_mutation(method), "{method}");
+        }
+        store
+            .update_phase(&mut journal, SetupTransactionPhase::Compensated)
+            .unwrap();
+        plugin_reject_unfinished_setup_transaction_at(&store).unwrap();
+        assert!(store.load().unwrap().is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_cli_lifecycle_mutations_share_the_setup_transaction_fence() {
+        let mutations = [
+            vec!["login"],
+            vec!["logout"],
+            vec!["config", "set", "selectedProfile", "stage"],
+            vec!["profile", "use", "stage"],
+            vec!["profile", "switch", "stage"],
+            vec!["org", "select", "org_1"],
+            vec!["project", "select", "project_1"],
+            vec!["bind"],
+            vec!["bind", "."],
+            vec!["bind", "revoke", "binding_1"],
+            vec!["runner", "start"],
+            vec!["runner", "stop"],
+            vec!["runner", "service", "install"],
+            vec!["runner", "service", "uninstall"],
+        ];
+        for args in mutations {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(direct_cli_is_lifecycle_mutation(&args), "{args:?}");
+        }
+
+        let read_only_or_runtime = [
+            vec!["config", "list"],
+            vec!["profile", "current"],
+            vec!["org", "list"],
+            vec!["project", "list"],
+            vec!["bind", "list"],
+            vec!["runner", "status"],
+            vec!["runner", "service", "status"],
+            vec!["runner", "service", "unit"],
+            vec!["runner", "service", "run"],
+            vec!["runner", "plugin-control", "setup.apply"],
+        ];
+        for args in read_only_or_runtime {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(!direct_cli_is_lifecycle_mutation(&args), "{args:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_runtime_homes_share_one_lifecycle_lock_and_journal_identity() {
+        let home = temp_credential_dir("stable-lifecycle-home");
+        let runtime_a = home.join("runtime-a");
+        let runtime_b = home.join("runtime-b");
+        let lifecycle_root_a = plugin_lifecycle_root_for_home(&home);
+        let lifecycle_root_b = plugin_lifecycle_root_for_home(&home);
+        assert_eq!(lifecycle_root_a, lifecycle_root_b);
+        assert_ne!(runtime_a, runtime_b);
+
+        let first =
+            PluginSetupTransactionLock::acquire_at_with_attempts(&lifecycle_root_a, 1).unwrap();
+        let error =
+            PluginSetupTransactionLock::acquire_at_with_attempts(&lifecycle_root_b, 1).unwrap_err();
+        assert!(error.contains("PLUGIN_SETUP_BUSY"));
+
+        let store_a = SetupTransactionStore::new(&lifecycle_root_a);
+        let snapshot = SetupTransactionSnapshot {
+            runtime_root: runtime_a.clone(),
+            active_runtime_version: None,
+            previous_runtime_version: None,
+            config: FileSnapshot::capture(home.join(".loomex/config.toml")).unwrap(),
+            service_file: FileSnapshot::capture(home.join("service/loomex.service")).unwrap(),
+            service_installed: false,
+            service_enabled: false,
+            service_active: false,
+        };
+        store_a
+            .begin(SetupTransactionOperation::Apply, snapshot)
+            .unwrap();
+        let store_b = SetupTransactionStore::new(&lifecycle_root_b);
+        let loaded = store_b.load().unwrap().unwrap();
+        assert_eq!(runtime_a, loaded.snapshot.runtime_root);
+        assert_ne!(runtime_b, loaded.snapshot.runtime_root);
+
+        store_b.clear().unwrap();
+        drop(first);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn systemd_compensation_orders_quiesce_restore_reload_enable_and_start() {
+        let options = RunnerServiceOptions {
+            platform: RunnerServicePlatform::LinuxUserSystemd,
+            service_name: "loomex-runner".to_string(),
+            binary_path: PathBuf::from("/usr/local/bin/loomex"),
+            config_path: PathBuf::from("/tmp/loomex.toml"),
+            profile: None,
+            log_path: None,
+            output_path: None,
+            uninstall_output_path: None,
+            dry_run: false,
+            once: false,
+            defer_start: false,
+        };
+
+        let quiesce = service_compensation_quiesce_commands(&options, true, true).unwrap();
+        let reload = systemctl_command(options.platform, &["daemon-reload"]);
+        let enable = service_compensation_enablement_commands(&options, true, true).unwrap();
+        let start = service_compensation_activity_commands(&options, true, true).unwrap();
+
+        assert_eq!(
+            vec!["--user", "stop", "loomex-runner.service"],
+            quiesce[0].args
+        );
+        assert_eq!(
+            vec!["--user", "disable", "loomex-runner.service"],
+            quiesce[1].args
+        );
+        // FileSnapshot::restore occurs between quiesce and this reload.
+        assert_eq!(vec!["--user", "daemon-reload"], reload.args);
+        assert_eq!(
+            vec!["--user", "enable", "loomex-runner.service"],
+            enable[0].args
+        );
+        assert_eq!(
+            vec!["--user", "start", "loomex-runner.service"],
+            start[0].args
+        );
+        assert!(
+            service_compensation_enablement_commands(&options, false, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            service_compensation_activity_commands(&options, true, false)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn compensation_stop_and_disable_failures_preserve_the_pending_journal() {
+        struct FailingRunner {
+            fail_at: usize,
+            calls: usize,
+        }
+
+        impl ServiceCommandRunner for FailingRunner {
+            fn run(&mut self, command: &ServiceCommand) -> Result<ServiceCommandOutput, String> {
+                let call = self.calls;
+                self.calls += 1;
+                if call == self.fail_at {
+                    return Err(format!("injected failure: {}", command.args.join(" ")));
+                }
+                Ok(ServiceCommandOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let root = temp_credential_dir("compensation-command-failure");
+        prepare_private_test_directory(&root);
+        let store = SetupTransactionStore::new(&root);
+        let snapshot = SetupTransactionSnapshot {
+            runtime_root: root.join("runtime"),
+            active_runtime_version: None,
+            previous_runtime_version: None,
+            config: FileSnapshot::capture(root.join("config.toml")).unwrap(),
+            service_file: FileSnapshot::capture(root.join("loomex.service")).unwrap(),
+            service_installed: false,
+            service_enabled: false,
+            service_active: false,
+        };
+        store
+            .begin(SetupTransactionOperation::Apply, snapshot)
+            .unwrap();
+        let options = RunnerServiceOptions {
+            platform: RunnerServicePlatform::LinuxUserSystemd,
+            service_name: "loomex-runner".to_string(),
+            binary_path: PathBuf::from("/usr/local/bin/loomex"),
+            config_path: PathBuf::from("/tmp/loomex.toml"),
+            profile: None,
+            log_path: None,
+            output_path: None,
+            uninstall_output_path: None,
+            dry_run: false,
+            once: false,
+            defer_start: false,
+        };
+        let commands = service_compensation_quiesce_commands(&options, true, true).unwrap();
+
+        for fail_at in [0, 1] {
+            let error = plugin_quiesce_service_for_compensation_with_runner(
+                &commands,
+                &mut FailingRunner { fail_at, calls: 0 },
+            )
+            .unwrap_err();
+            assert!(error.contains("injected failure"));
+            assert!(store.load().unwrap().is_some());
+        }
+
+        store.clear().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn strict_service_probe_classifies_expected_negatives_and_manager_errors() {
+        assert_eq!(
+            Ok(false),
+            classify_strict_probe_output(
+                false,
+                Some(113),
+                "",
+                "could not find service",
+                StrictProbeKind::LaunchctlLoaded,
+            )
+        );
+        assert!(classify_strict_probe_output(
+            false,
+            Some(1),
+            "",
+            "operation not permitted",
+            StrictProbeKind::LaunchctlLoaded,
+        )
+        .unwrap_err()
+        .contains("operation not permitted"));
+        assert_eq!(
+            Ok(false),
+            classify_strict_probe_output(
+                false,
+                Some(3),
+                "inactive",
+                "",
+                StrictProbeKind::SystemdActive,
+            )
+        );
+        assert_eq!(
+            Ok(false),
+            classify_strict_probe_output(
+                true,
+                Some(0),
+                "static",
+                "",
+                StrictProbeKind::SystemdEnabled,
+            )
+        );
+        assert_eq!(
+            Ok(true),
+            classify_strict_probe_output(
+                true,
+                Some(0),
+                "enabled",
+                "",
+                StrictProbeKind::SystemdEnabled,
+            )
+        );
+        assert!(classify_strict_probe_output(
+            false,
+            Some(1),
+            "",
+            "failed to connect to bus",
+            StrictProbeKind::SystemdEnabled,
+        )
+        .unwrap_err()
+        .contains("failed to connect to bus"));
+    }
+
+    #[test]
+    fn strict_systemd_initial_and_launchctl_final_probe_failures_preserve_journal() {
+        struct SequenceProbe {
+            results: std::collections::VecDeque<Result<StrictServiceState, String>>,
+        }
+
+        impl TransactionServiceStatusProbe for SequenceProbe {
+            fn probe(
+                &mut self,
+                _options: &RunnerServiceOptions,
+            ) -> Result<StrictServiceState, String> {
+                self.results.pop_front().expect("probe sequence exhausted")
+            }
+        }
+
+        fn pending_journal(root: &Path) -> (SetupTransactionStore, SetupTransactionJournal) {
+            prepare_private_test_directory(root);
+            let store = SetupTransactionStore::new(root);
+            let snapshot = SetupTransactionSnapshot {
+                runtime_root: root.join("runtime"),
+                active_runtime_version: None,
+                previous_runtime_version: None,
+                config: FileSnapshot::capture(root.join("config.toml")).unwrap(),
+                service_file: FileSnapshot::capture(root.join("loomex.service")).unwrap(),
+                service_installed: false,
+                service_enabled: false,
+                service_active: false,
+            };
+            let journal = store
+                .begin(SetupTransactionOperation::Apply, snapshot)
+                .unwrap();
+            (store, journal)
+        }
+
+        let initial_root = temp_credential_dir("strict-systemd-initial-probe");
+        let (initial_store, initial_journal) = pending_journal(&initial_root);
+        let mut initial_probe = SequenceProbe {
+            results: [Err(
+                "PLUGIN_SETUP_SERVICE_PROBE_FAILED: systemd manager unavailable".to_string(),
+            )]
+            .into(),
+        };
+        let error = plugin_compensate_setup_transaction_with(
+            &initial_journal,
+            &GlobalOptions::default(),
+            &mut initial_probe,
+            &mut TestServiceCommandRunner::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("systemd manager unavailable"));
+        assert!(initial_store.load().unwrap().is_some());
+
+        let final_root = temp_credential_dir("strict-launchctl-final-probe");
+        let (final_store, final_journal) = pending_journal(&final_root);
+        let mut final_probe = SequenceProbe {
+            results: [
+                Ok(StrictServiceState {
+                    installed: false,
+                    enabled: false,
+                    active: false,
+                }),
+                Err("PLUGIN_SETUP_SERVICE_PROBE_FAILED: launchctl probe denied".to_string()),
+            ]
+            .into(),
+        };
+        let error = plugin_compensate_setup_transaction_with(
+            &final_journal,
+            &GlobalOptions::default(),
+            &mut final_probe,
+            &mut TestServiceCommandRunner::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("launchctl probe denied"));
+        assert!(final_store.load().unwrap().is_some());
+
+        initial_store.clear().unwrap();
+        final_store.clear().unwrap();
+        fs::remove_dir_all(initial_root).unwrap();
+        fs::remove_dir_all(final_root).unwrap();
+    }
+
+    #[test]
+    fn strict_pre_snapshot_systemd_and_launchctl_failures_create_no_journal_or_mutation() {
+        struct FailingSnapshotProbe {
+            expected_platform: RunnerServicePlatform,
+            calls: usize,
+        }
+
+        impl TransactionServiceStatusProbe for FailingSnapshotProbe {
+            fn probe(
+                &mut self,
+                options: &RunnerServiceOptions,
+            ) -> Result<StrictServiceState, String> {
+                assert_eq!(self.expected_platform, options.platform);
+                self.calls += 1;
+                Err(format!(
+                    "PLUGIN_SETUP_SERVICE_PROBE_FAILED: injected {} pre-snapshot failure",
+                    options.platform.as_str()
+                ))
+            }
+        }
+
+        for platform in [
+            RunnerServicePlatform::LinuxUserSystemd,
+            RunnerServicePlatform::MacOsLaunchAgent,
+        ] {
+            let root = temp_credential_dir(&format!("pre-snapshot-{}", platform.as_str()));
+            let lifecycle_root = root.join("lifecycle");
+            prepare_private_test_directory(&lifecycle_root);
+            let runtime_root = root.join("runtime");
+            let installer = RuntimeInstaller::new(&runtime_root);
+            let store = SetupTransactionStore::new(&lifecycle_root);
+            let observer = SetupTransactionStore::new(&lifecycle_root);
+            let service_options = RunnerServiceOptions {
+                platform,
+                service_name: "loomex-runner".to_string(),
+                binary_path: PathBuf::from("/usr/local/bin/loomex"),
+                config_path: root.join("config.toml"),
+                profile: None,
+                log_path: None,
+                output_path: None,
+                uninstall_output_path: None,
+                dry_run: false,
+                once: false,
+                defer_start: false,
+            };
+            let mut probe = FailingSnapshotProbe {
+                expected_platform: platform,
+                calls: 0,
+            };
+
+            let error = plugin_begin_setup_transaction_with_probe(
+                SetupTransactionOperation::Apply,
+                &installer,
+                &service_options,
+                store,
+                &mut probe,
+            )
+            .unwrap_err();
+
+            assert!(error.contains("pre-snapshot failure"));
+            assert_eq!(1, probe.calls);
+            assert!(observer.load().unwrap().is_none());
+            assert!(!runtime_root.exists());
+            assert!(!root.join("config.toml").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    fn install_bundled_test_runtime(installer: &RuntimeInstaller, version: &str, bytes: &[u8]) {
+        let digest = sha256_hex(bytes);
+        installer
+            .install_bundled(BundledRuntimeInstall {
+                version,
+                artifact_name: "loomex-plugin-runtime",
+                artifact_sha256: &digest,
+                artifact_os: env::consts::OS,
+                artifact_arch: env::consts::ARCH,
+                artifact_bytes: bytes,
+                executable_name: plugin_runtime_executable_name(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn plugin_setup_plan_id_binds_every_reviewed_field() {
+        let base = json!({
+            "channel": "stable",
+            "installService": true,
+            "serviceAction": "restart_healthcheck",
+            "previousVersion": "1.2.2",
+            "runtimePath": "/runtime/current/bin/loomex",
+        });
+        let mut changed = base.clone();
+        changed["serviceAction"] = json!("stop_and_defer");
+        assert_ne!(
+            plugin_setup_plan_id(&base).unwrap(),
+            plugin_setup_plan_id(&changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn plugin_setup_install_service_false_preserves_any_existing_service() {
+        assert_eq!(
+            plugin_setup_service_disposition(false, false),
+            PluginSetupServiceDisposition::Preserve
+        );
+        assert_eq!(
+            plugin_setup_service_disposition(false, true),
+            PluginSetupServiceDisposition::Preserve
+        );
+        assert_eq!(
+            plugin_setup_service_disposition(true, true),
+            PluginSetupServiceDisposition::ActivateExisting
+        );
+        assert_eq!(
+            plugin_setup_service_disposition(true, false),
+            PluginSetupServiceDisposition::Install
+        );
+    }
+
+    #[test]
+    fn plugin_runtime_self_test_rejects_unverified_bytes_before_execution() {
+        let error =
+            plugin_self_test_runtime_bytes(b"not an executable", &"0".repeat(64)).unwrap_err();
+        assert!(error.contains("PLUGIN_RUNTIME_CHECKSUM_MISMATCH"));
+    }
+
+    #[test]
+    fn unsigned_validation_package_requires_explicit_validation_gate() {
+        let error =
+            validate_plugin_distribution("validation", "unsigned-validation", false).unwrap_err();
+        assert!(error.contains("PLUGIN_PACKAGE_UNSIGNED_VALIDATION_ONLY"));
+        validate_plugin_distribution("validation", "unsigned-validation", true).unwrap();
+        validate_plugin_distribution("official", "platform-signed", false).unwrap();
+        assert!(validate_plugin_distribution("official", "unsigned-validation", true).is_err());
+    }
+
     fn temp_config_path(label: &str) -> PathBuf {
         env::temp_dir().join(format!(
             "loomex-cli-{label}-{}-{}.toml",
@@ -9724,5 +15218,14 @@ mod tests {
             process::id(),
             std::thread::current().name().unwrap_or("test")
         ))
+    }
+
+    fn prepare_private_test_directory(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
     }
 }
