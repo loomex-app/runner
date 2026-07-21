@@ -40,7 +40,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         tool(
             "loomex_setup_status",
             "Setup status",
-            "Inspect the installed Loomex runtime without changing it.",
+            "First step for every Loomex request. Read setupRequired and recommendedNextAction; this call never changes the system.",
             "setup.status",
             obj(&[], &[]),
             ro(),
@@ -48,7 +48,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         tool(
             "loomex_setup_plan",
             "Plan setup",
-            "Prepare an integrity-bound, reviewable runner installation or upgrade plan.",
+            "Immediately prepare a read-only setup plan when setup status recommends setup.plan; no preliminary user question is needed.",
             "setup.plan",
             obj(
                 &[
@@ -662,6 +662,14 @@ fn output_data_schema(tool_name: &str) -> Value {
                 ("runtimeRoot", path_string()),
                 ("service", evolvable_object(&[], &[])),
                 ("supported", boolean()),
+                ("setupRequired", boolean()),
+                (
+                    "recommendedNextAction",
+                    enum_string(&["setup.plan", "auth.status", "package.error", "unsupported"]),
+                ),
+                ("recommendationReason", identifier()),
+                ("bundledRuntime", evolvable_object(&[], &[])),
+                ("durableRuntime", evolvable_object(&[], &[])),
             ],
             &[
                 "installed",
@@ -1203,7 +1211,13 @@ mod tests {
         };
         match name {
             "loomex_setup_status" => {
-                json!({"installed":false,"runtime":null,"runtimeRoot":"/runtime","service":{},"supported":true})
+                json!({
+                    "installed":false,"runtime":null,"runtimeRoot":"/runtime","service":{},"supported":true,
+                    "setupRequired":true,"recommendedNextAction":"setup.plan",
+                    "recommendationReason":"runtime_mismatch",
+                    "bundledRuntime":{"available":true,"version":"1.0.0","pluginVersion":"1.0.0","channel":"stable","target":"aarch64-apple-darwin"},
+                    "durableRuntime":{"installed":false,"runtime":null,"runtimeRoot":"/runtime","runtimeMatchesBundle":false,"serviceRegistered":false,"serviceActive":false}
+                })
             }
             "loomex_setup_plan" => json!({
                 "planId":"plan-1","action":"install","version":"1.0.0","pluginVersion":"1.0.0",
@@ -1338,6 +1352,45 @@ mod tests {
             validate_output(&definition.output_schema, &failure(definition.name))
                 .unwrap_or_else(|error| panic!("{} failure fixture: {error}", definition.name));
         }
+    }
+
+    #[test]
+    fn setup_status_contract_accepts_legacy_additive_and_future_shapes() {
+        let definition = definition("loomex_setup_status").unwrap();
+        let legacy = json!({
+            "installed":false,"runtime":null,"runtimeRoot":"/runtime","service":{},"supported":true
+        });
+        validate_output(
+            &definition.output_schema,
+            &envelope(definition.name, legacy.clone()),
+        )
+        .unwrap();
+
+        let mut additive = legacy;
+        additive["setupRequired"] = json!(true);
+        additive["recommendedNextAction"] = json!("setup.plan");
+        additive["recommendationReason"] = json!("runtime_mismatch");
+        additive["bundledRuntime"] = json!({
+            "available":true,"version":"1.0.0","pluginVersion":"1.0.0",
+            "channel":"stable","target":"aarch64-apple-darwin"
+        });
+        additive["durableRuntime"] = json!({
+            "installed":false,"runtime":null,"runtimeRoot":"/runtime",
+            "runtimeMatchesBundle":false,"serviceRegistered":false,"serviceActive":false
+        });
+        validate_output(
+            &definition.output_schema,
+            &envelope(definition.name, additive.clone()),
+        )
+        .unwrap();
+
+        additive["futureExtra"] = json!({"allowed": true});
+        additive["bundledRuntime"]["futurePackageField"] = json!(1);
+        validate_output(
+            &definition.output_schema,
+            &envelope(definition.name, additive),
+        )
+        .unwrap();
     }
 
     #[test]

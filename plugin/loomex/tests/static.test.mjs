@@ -108,8 +108,44 @@ test("MCP startup has no host Node dependency", async () => {
 test("one-install documentation requires both bundled native artifacts", async () => {
   const readme = await readFile(path.join(root, "README.md"), "utf8");
   const packaging = await readFile(path.join(root, "packaging", "README.md"), "utf8");
-  assert.match(readme, /both the `loomex-mcp` adapter\s+and the matching Loomex Runner runtime/);
+  assert.match(readme, /both the `loomex-mcp` adapter\s+and the matching, verified Loomex Runner runtime/);
   assert.match(packaging, /includes every supported\s+macOS\/Linux MCP adapter and Runner pair/);
   assert.match(packaging, /does not ask the user to obtain a second installer/);
   assert.doesNotMatch(readme, /Windows/);
+});
+
+test("natural Loomex requests automatically enter first-use onboarding", async () => {
+  const manifest = JSON.parse(
+    await readFile(path.join(root, ".codex-plugin", "plugin.json"), "utf8"),
+  );
+  const skill = await readFile(path.join(root, "skills", "loomex", "SKILL.md"), "utf8");
+  const setup = await readFile(
+    path.join(root, "skills", "loomex", "references", "setup-and-auth.md"),
+    "utf8",
+  );
+  const readme = await readFile(path.join(root, "README.md"), "utf8");
+  const installer = await readFile(path.join(root, "scripts", "install-codex.sh"), "utf8");
+
+  assert.equal(manifest.version, "0.1.4");
+  assert.match(manifest.interface.longDescription, /automatically checks first-use readiness/);
+  assert.match(manifest.interface.defaultPrompt.join("\n"), /setup should start automatically/);
+  assert.match(skill, /For every natural-language Loomex request/);
+  assert.match(skill, /immediately call the read-only\s+`loomex_setup_plan`/);
+  assert.match(skill, /ask for approval\s+only before `loomex_setup_apply`/i);
+  assert.match(skill, /resume the user's\s+original request/);
+  assert.match(setup, /Never tell the user to type a setup phrase/);
+  assert.match(readme, /No special setup prompt is\s+needed/);
+  assert.match(installer, /ask for any Loomex workflow naturally/);
+});
+
+test("plugin has no default SessionStart hook and authenticates on first use", async () => {
+  const manifest = JSON.parse(
+    await readFile(path.join(root, ".codex-plugin", "plugin.json"), "utf8"),
+  );
+  const marketplace = JSON.parse(
+    await readFile(path.join(root, "packaging", "marketplace.template.json"), "utf8"),
+  );
+  assert.equal(Object.hasOwn(manifest, "hooks"), false);
+  await assert.rejects(readdir(path.join(root, "hooks")), /ENOENT/);
+  assert.equal(marketplace.plugins[0].policy.authentication, "ON_USE");
 });
