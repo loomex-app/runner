@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 - 2026-07-21
+
+- Install Cosign 3.1.2 in the release workflow from its official binary with a
+  pinned SHA-256 checksum, avoiding the unavailable legacy detached-signature
+  asset while preserving keyless Sigstore signing and verification.
+
 ## 0.1.2 - 2026-07-21
 
 - Add a one-command GitHub-hosted Codex installer for macOS and Linux.
