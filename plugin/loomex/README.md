@@ -8,11 +8,13 @@ remains supported; both clients use the same backend and per-user Runner service
 ## User experience
 
 Official macOS and Linux release packages include both the `loomex-mcp` adapter
-and the matching Loomex Runner runtime. On first use, ask Codex to set up Loomex.
-The plugin previews the per-user service changes, verifies and installs that
-bundled runtime into Loomex's stable runtime directory after approval, starts
-it, and guides authentication. There is no separate Runner download in the
-normal installation flow.
+and the matching, verified Loomex Runner runtime. No special setup prompt is
+needed: any natural Loomex request makes Codex check setup status first. When
+the durable per-user service is missing, Codex automatically prepares and shows
+the read-only setup plan, asks for approval only before applying it, then guides
+authentication, scope selection, and workspace binding before resuming the
+original request. There is no separate Runner download in the normal
+installation flow.
 
 ## Install from the Loomex marketplace
 

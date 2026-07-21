@@ -2,9 +2,15 @@
 
 ## Inspect
 
-Call `loomex_setup_status`. If it reports a healthy compatible Runner, continue
-without setup. Otherwise call `loomex_setup_plan`. Its public optional fields are
-`version`, `channel` (`stable` or `beta`), and `installService`. Report:
+For every Loomex request, call `loomex_setup_status` first and obey its
+`recommendedNextAction`. Never tell the user to type a setup phrase. The status
+separates the verified runtime bundled in the plugin (`bundledRuntime`) from the
+installed runtime and registered per-user service (`durableRuntime`).
+
+If `recommendedNextAction` is `setup.plan`, immediately call the read-only
+`loomex_setup_plan`; do not ask whether setup should be started. Its public
+optional fields are `version`, `channel` (`stable` or `beta`), and
+`installService`. Report:
 
 - whether this is install, update, or repair;
 - the version and stable per-user install path;
@@ -14,7 +20,7 @@ without setup. Otherwise call `loomex_setup_plan`. Its public optional fields ar
 
 ## Apply
 
-Ask the user to approve the concrete plan before `loomex_setup_apply`. Call it
+Ask the user to approve the concrete plan only before `loomex_setup_apply`. Call it
 with the returned `planId`, exact returned `channel` and `installService`, and
 `confirm: true`; never invent, alter, or reuse a plan ID. These fields are bound
 to the plan, so changing either option requires generating and reviewing a new
@@ -40,6 +46,14 @@ rollback as successful until the returned health state is healthy.
 
 The initial setup call must finish before the user closes Codex. After the
 service is healthy, long-running workflow execution no longer depends on Codex.
+
+If `recommendedNextAction` is `auth.status`, do not create another setup plan,
+even when the registered service is inactive or deferred while authentication
+or binding is incomplete. Continue with authentication, organization/project
+scope, and workspace binding below, then resume the original Loomex request.
+If the action is `unsupported`, report the structured reason and do not attempt
+setup. If it is `package.error`, report `bundledRuntime.error`; do not misreport
+a malformed or unavailable package as an unsupported platform.
 
 ## Authenticate
 

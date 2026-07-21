@@ -447,7 +447,7 @@ def assemble(args: argparse.Namespace) -> Path:
         or plugins[0].get("source")
         != {"source": "local", "path": "./plugins/loomex"}
         or plugins[0].get("policy")
-        != {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}
+        != {"installation": "AVAILABLE", "authentication": "ON_USE"}
     ):
         raise AssemblyError("marketplace template does not match the Codex marketplace contract")
     runtime_version = template.get("runtimeVersion")

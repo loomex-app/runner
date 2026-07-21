@@ -486,7 +486,7 @@ else:
         for unsafe in ("--insecure", "--insecure-ignore-tlog", "xattr", "spctl", "sudo"):
             self.assertNotIn(unsafe, installer)
 
-        rendered = installer.replace("@LOOMEX_RELEASE_VERSION@", "0.1.3")
+        rendered = installer.replace("@LOOMEX_RELEASE_VERSION@", "0.1.4")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             complete = root / "install-codex.sh"
@@ -1132,7 +1132,7 @@ else:
                     "--marketplace-installer",
                     str(temp / "loomex-install-marketplace.sh"),
                     "--version",
-                    "0.1.3",
+                    "0.1.4",
                 ],
                 text=True,
                 capture_output=True,
@@ -1154,7 +1154,7 @@ else:
             shutil.copytree(ROOT / "plugin/loomex", source)
             plugin_json = source / ".codex-plugin/plugin.json"
             plugin = json.loads(plugin_json.read_text())
-            plugin["version"] = "0.1.3+codex.local-20260721-120000"
+            plugin["version"] = "0.1.4+codex.local-20260721-120000"
             plugin_json.write_text(json.dumps(plugin))
             artifacts = temp / "artifacts"
             self.write_artifacts(artifacts)
@@ -1172,7 +1172,7 @@ else:
             self.assertEqual(result.returncode, 0, result.stderr)
             manifest = json.loads((temp / "dist/loomex/packaging/runtime-manifest.json").read_text())
             self.assertEqual(manifest["pluginVersion"], plugin["version"])
-            self.assertEqual(manifest["runtimeVersion"], "0.1.3")
+            self.assertEqual(manifest["runtimeVersion"], "0.1.4")
             self.assertEqual(validate_runtime_integrity(temp / "dist/loomex"), [])
 
 
@@ -1225,7 +1225,7 @@ class AssemblePluginTest(unittest.TestCase):
                 "plugins": [{
                     "name": "loomex",
                     "source": {"source": "local", "path": "./plugins/loomex"},
-                    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+                    "policy": {"installation": "AVAILABLE", "authentication": "ON_USE"},
                     "category": "Productivity",
                 }],
             }),

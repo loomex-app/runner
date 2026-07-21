@@ -29,19 +29,27 @@ Read every reference needed for the user's request before calling its tools.
 
 ## Baseline behavior
 
-1. For a normal first interaction, call `loomex_setup_status`, then
-   `loomex_auth_status`. Do not rerun setup when the installation is healthy.
-2. If setup is required, use plan then apply. Show the plan and obtain the
-   user's approval before persistent service or filesystem changes.
-3. Reuse the selected organization, project, and existing binding when they
+1. For every natural-language Loomex request, first call
+   `loomex_setup_status` and branch on its `recommendedNextAction`. Never wait
+   for or request a special setup phrase.
+2. When the next action is `setup.plan`, immediately call the read-only
+   `loomex_setup_plan` without asking a preliminary question. Explain that the
+   verified runtime is already bundled with the plugin, but its durable
+   per-user service is not set up yet. Show the concrete plan; ask for approval
+   only before `loomex_setup_apply`.
+3. When setup is complete, continue through authentication, required
+   organization/project scope, and workspace binding, then resume the user's
+   original request in the same conversation. A registered service that is
+   deferred or inactive pending auth/binding is not a reason to repair setup.
+4. Reuse the selected organization, project, and existing binding when they
    unambiguously match the current workspace. Never silently widen a binding.
-4. Before running, use `loomex_workflow_show` to confirm inputs and local
+5. Before running, use `loomex_workflow_show` to confirm inputs and local
    capabilities when the workflow or parameters are ambiguous.
-5. Treat the ID returned by `loomex_workflow_run` as authoritative. Follow it
+6. Treat the ID returned by `loomex_workflow_run` as authoritative. Follow it
    with `loomex_run_wait`; do not run shell commands to imitate its nodes.
-6. When a wait returns a human request or approval, present the exact prompt,
+7. When a wait returns a human request or approval, present the exact prompt,
    choices, consequences, and run context. Submit only the user's decision.
-7. A closed Codex app cannot surface new prompts. The durable Runner keeps the
+8. A closed Codex app cannot surface new prompts. The durable Runner keeps the
    run alive and the backend retains pending work. On reconnect, query the run
    and pending inboxes, and explain this boundary honestly.
 
