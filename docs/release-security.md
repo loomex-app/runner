@@ -10,6 +10,27 @@ Loomex Runner releases are distributed through an explicit trust chain:
    any artifact metadata, URL, checksum, or provenance.
 5. The artifact checksum, size, and signature are verified before install.
 
+## Codex Plugin Release
+
+The Codex plugin release uses a separate public-distribution path. Its macOS
+and Linux native executables intentionally carry no OS-vendor signature; macOS
+binaries are also not notarized. CI records that state in the runtime manifest
+and marketplace provenance instead of presenting the binaries as Apple-signed.
+
+Production plugin tags must resolve to the exact standard GitHub merge commit
+of one PR into `stage` or `main`, and the release SHA must still be reachable
+from that base branch. The marketplace provenance binds the source SHA, tag,
+base branch, and PR number to the content-addressed marketplace tree. SHA-256
+checksums cover the archives, and GitHub Actions keyless Sigstore bundles cover
+the plugin archive, marketplace archive, provenance, and installer. No Apple
+Developer ID or stored signing key is required for this path.
+
+Because the macOS executables are not Developer ID signed or notarized,
+Gatekeeper may block or warn on first launch after download. Users must inspect
+and verify the published SHA-256 and Sigstore bundle before choosing to allow
+the executable in macOS security settings. This limitation applies to the
+Codex plugin bundle only; the Tauri app distribution policy below is unchanged.
+
 The release manifest schema is `loomex.runner.releaseManifest/v1`. The helper
 commands are:
 

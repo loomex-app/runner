@@ -7,11 +7,12 @@ use crate::{CoreError, CoreResult};
 pub const CONFIG_DIR_NAME: &str = ".loomex";
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 pub const LEGACY_CONFIG_DIR_NAME: &str = ".loomex-runner";
-pub const CLI_CONFIG_VERSION: u32 = 1;
+pub const CLI_CONFIG_VERSION: u32 = 2;
 pub const DEFAULT_PROFILE_NAME: &str = "default";
 pub const DEFAULT_SERVER_URL: &str = "https://loomex.app";
 pub const STAGE_SERVER_URL: &str = "https://stage.loomex.app";
-pub const LOCAL_SERVER_URL: &str = "http://127.0.0.1:28080";
+pub const LOCAL_SERVER_URL: &str = "http://127.0.0.1:28000";
+const LEGACY_LOCAL_SERVER_URL: &str = "http://127.0.0.1:28080";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerConfig {
@@ -279,8 +280,13 @@ impl CliConfig {
             }
         }
 
-        if !saw_config_version {
-            config.config_version = CLI_CONFIG_VERSION;
+        let source_config_version = if saw_config_version {
+            config.config_version
+        } else {
+            1
+        };
+        if source_config_version > 0 && source_config_version < CLI_CONFIG_VERSION {
+            config.migrate_from_version(source_config_version);
         }
         if !saw_profile && !content.trim().is_empty() {
             return Err(CoreError::new(
@@ -290,6 +296,17 @@ impl CliConfig {
         }
         config.validate()?;
         Ok(config)
+    }
+
+    fn migrate_from_version(&mut self, source_version: u32) {
+        if source_version < 2 {
+            if let Some(local_profile) = self.profiles.get_mut("local") {
+                if local_profile.server_url == LEGACY_LOCAL_SERVER_URL {
+                    local_profile.server_url = LOCAL_SERVER_URL.to_string();
+                }
+            }
+        }
+        self.config_version = CLI_CONFIG_VERSION;
     }
 
     pub fn to_document(&self) -> String {
@@ -729,6 +746,95 @@ mod tests {
     }
 
     #[test]
+    fn local_profile_targets_the_direct_local_backend_port() {
+        let config = CliConfig::default();
+        let resolved = config
+            .resolve(
+                CliConfigOverrides {
+                    profile: Some("local".to_string()),
+                    ..CliConfigOverrides::default()
+                },
+                |_| None,
+            )
+            .unwrap();
+
+        assert_eq!("http://127.0.0.1:28000", resolved.server_url);
+        assert_eq!(Some("loomex.localhost"), resolved.host_header.as_deref());
+    }
+
+    #[test]
+    fn persisted_v1_local_default_migrates_to_the_direct_backend_port() {
+        let path = std::env::temp_dir().join(format!(
+            "loomex-cli-v1-local-port-migration-{}-{}.toml",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::write(
+            &path,
+            r#"configVersion = 1
+selectedProfile = "local"
+
+[profiles."local"]
+serverUrl = "http://127.0.0.1:28080"
+hostHeader = "loomex.localhost"
+"#,
+        )
+        .unwrap();
+
+        let config = CliConfig::load_or_default(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(CLI_CONFIG_VERSION, config.config_version);
+        assert_eq!(LOCAL_SERVER_URL, config.profiles["local"].server_url);
+        assert_eq!(
+            Some("loomex.localhost"),
+            config.profiles["local"].host_header.as_deref()
+        );
+    }
+
+    #[test]
+    fn v1_migration_preserves_custom_local_and_non_local_urls() {
+        let config = CliConfig::parse(
+            r#"configVersion = 1
+selectedProfile = "local"
+
+[profiles."local"]
+serverUrl = "http://localhost:28080"
+
+[profiles."dev"]
+serverUrl = "http://127.0.0.1:28080"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(CLI_CONFIG_VERSION, config.config_version);
+        assert_eq!(
+            "http://localhost:28080",
+            config.profiles["local"].server_url
+        );
+        assert_eq!("http://127.0.0.1:28080", config.profiles["dev"].server_url);
+    }
+
+    #[test]
+    fn v2_config_preserves_explicit_legacy_router_url() {
+        let config = CliConfig::parse(
+            r#"configVersion = 2
+selectedProfile = "local"
+
+[profiles."local"]
+serverUrl = "http://127.0.0.1:28080"
+hostHeader = "loomex.localhost"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            "http://127.0.0.1:28080",
+            config.profiles["local"].server_url
+        );
+    }
+
+    #[test]
     fn readme_default_profile_matches_canonical_server_url() {
         let readme = include_str!("../../../README.md");
         let expected = format!("serverUrl = \"{DEFAULT_SERVER_URL}\"");
@@ -746,7 +852,7 @@ mod tests {
             "selectedProfile = \"local\"\n",
             "\n",
             "[profiles.\"local\"]\n",
-            "serverUrl = \"http://127.0.0.1:28080\"\n",
+            "serverUrl = \"http://127.0.0.1:28000\"\n",
             "hostHeader = \"loomex.localhost\"\n",
             "organizationId = \"org_123\"\n",
             "projectId = \"prj_123\"\n",
@@ -911,14 +1017,14 @@ serverUrl = "https://loomex.app"
             r#"defaultProfile = "local"
 
 [profiles."local"]
-serverUrl = "http://127.0.0.1:28080"
+serverUrl = "http://127.0.0.1:28000"
 hostHeader = "loomex.localhost"
 "#,
         )
         .unwrap();
 
         assert_eq!(CLI_CONFIG_VERSION, config.config_version);
-        assert!(config.to_document().starts_with("configVersion = 1\n"));
+        assert!(config.to_document().starts_with("configVersion = 2\n"));
     }
 
     #[test]
@@ -928,7 +1034,7 @@ hostHeader = "loomex.localhost"
         config
             .set_key(
                 "profiles.dev.serverUrl",
-                "http://127.0.0.1:28080".to_string(),
+                "http://127.0.0.1:28000".to_string(),
             )
             .unwrap();
         config
@@ -944,7 +1050,7 @@ hostHeader = "loomex.localhost"
         );
         assert!(config.list_entries().contains(&(
             "profiles.dev.serverUrl".to_string(),
-            "http://127.0.0.1:28080".to_string()
+            "http://127.0.0.1:28000".to_string()
         )));
     }
 }

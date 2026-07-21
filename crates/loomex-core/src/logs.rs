@@ -246,6 +246,67 @@ pub fn read_recent_log_entries(path: impl AsRef<Path>, limit: usize) -> CoreResu
     }
 }
 
+/// Redact an entry immediately before it crosses a local API boundary.
+///
+/// FileLogSink already redacts new records before persistence. This second pass is intentional:
+/// older files and manually modified JSONL must not be trusted merely because they deserialize as
+/// a `LogEntry`.
+pub fn redact_log_entry_for_local_output(mut entry: LogEntry) -> LogEntry {
+    entry.level = redact_untrusted_text(&entry.level);
+    entry.event_type = redact_untrusted_text(&entry.event_type);
+    entry.message = redact_untrusted_text(&entry.message);
+    entry.correlation_id = redact_untrusted_text(&entry.correlation_id);
+    entry.workflow_run_id = entry
+        .workflow_run_id
+        .map(|value| redact_untrusted_text(&value));
+    entry.tool_call_id = entry
+        .tool_call_id
+        .map(|value| redact_untrusted_text(&value));
+    redact_untrusted_json_value(&mut entry.metadata);
+    entry
+}
+
+fn redact_untrusted_json_value(value: &mut Value) {
+    match value {
+        Value::String(text) => *text = redact_untrusted_text(text),
+        Value::Array(items) => {
+            for item in items {
+                redact_untrusted_json_value(item);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                if is_sensitive_key(key) {
+                    *item = Value::String("[REDACTED]".to_string());
+                } else {
+                    redact_untrusted_json_value(item);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_untrusted_text(input: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let compact = lower
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    if lower.contains("bearer ")
+        || SENSITIVE_KEY_PARTS.iter().any(|key| {
+            compact.contains(&format!("{key}="))
+                || compact.contains(&format!("{key}:"))
+                || compact.contains(&format!("\"{key}\":"))
+                || compact.contains(&format!("'{key}':"))
+        })
+    {
+        "[REDACTED]".to_string()
+    } else {
+        Redactor::new(Vec::new()).redact(input)
+    }
+}
+
 fn redact_json_value(value: &mut Value, redactor: &Redactor) {
     match value {
         Value::String(text) => {
@@ -355,6 +416,31 @@ mod tests {
         assert!(rotated.exists());
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&rotated);
+    }
+
+    #[test]
+    fn local_output_redacts_legacy_or_tampered_parsed_entries() {
+        let entry = LogEntry::new(
+            "info",
+            "legacy.record",
+            "Authorization: Bearer leaked-management-token",
+        )
+        .with_correlation_id("token=leaked-correlation-token")
+        .with_metadata(json!({
+            "safe": "visible",
+            "nested": {
+                "api-key": "leaked-api-key",
+                "detail": "password: leaked-password"
+            }
+        }));
+
+        let redacted = redact_log_entry_for_local_output(entry);
+
+        let serialized = serde_json::to_string(&redacted).expect("serialize redacted entry");
+        assert!(serialized.contains("visible"));
+        assert!(!serialized.contains("leaked-"));
+        assert_eq!(redacted.message, "[REDACTED]");
+        assert_eq!(redacted.metadata["nested"]["api-key"], "[REDACTED]");
     }
 
     fn test_log_path(name: &str) -> PathBuf {
