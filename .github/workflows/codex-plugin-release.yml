@@ -446,13 +446,15 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ needs.assemble.outputs.artifact-name }}
           path: release
-      - uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
-        with:
-          cosign-release: v3.1.2
+      - name: Install checksum-pinned Cosign
+        run: bash .github/scripts/install-cosign.sh
       - name: Keyless-sign and verify immutable release blobs
         shell: bash
         run: |
@@ -512,9 +514,8 @@ jobs:
         with:
           name: loomex-codex-plugin-${{ needs.assemble.outputs.version }}-SIGSTORE-SIGNED
           path: ${{ runner.temp }}/release
-      - uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
-        with:
-          cosign-release: v3.1.2
+      - name: Install checksum-pinned Cosign
+        run: bash .github/scripts/install-cosign.sh
       - name: Publish content-addressed assembled marketplace tree
         shell: bash
         run: |
@@ -635,13 +636,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: loomex-codex-plugin-${{ needs.assemble.outputs.version }}-SIGSTORE-SIGNED
           path: release
-      - uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
-        with:
-          cosign-release: v3.1.2
+      - name: Install checksum-pinned Cosign
+        run: bash .github/scripts/install-cosign.sh
       - name: Reverify signed blobs and reject existing same-version assets
         shell: bash
         run: |

@@ -69,8 +69,25 @@ class ReleaseProvenanceTest(unittest.TestCase):
             "codesign",
             "required_reviewers",
             "pulls/{number}/reviews",
+            "sigstore/cosign-installer",
         ):
             self.assertNotIn(forbidden, workflow)
+        self.assertEqual(
+            workflow.count("run: bash .github/scripts/install-cosign.sh"), 3
+        )
+        cosign_installer = (MODULE_PATH.parent / "install-cosign.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('cosign_version="3.1.2"', cosign_installer)
+        self.assertIn(
+            'cosign_sha256="f7622ed3cf22e55e1ae6377c080979ff77a22da9981c11df222a2e444991e7cf"',
+            cosign_installer,
+        )
+        self.assertIn("--proto '=https' --tlsv1.2", cosign_installer)
+        self.assertLess(
+            cosign_installer.index("sha256sum -c -"),
+            cosign_installer.index('printf \'%s\\n\' "$install_dir" >>'),
+        )
         signing = workflow[
             workflow.index("\n  sign-release-archive:") : workflow.index("\n  publish-marketplace:")
         ]
