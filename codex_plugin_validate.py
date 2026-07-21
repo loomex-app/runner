@@ -250,8 +250,8 @@ def validate_runtime_integrity(root: Path) -> list[str]:
     ):
         failures.append("runtime manifest runtimeVersion differs from plugin base version")
     expected_distribution = (
-        "official"
-        if manifest.get("packageSigningState") == "platform-signed"
+        "release"
+        if manifest.get("packageSigningState") == "unsigned-release"
         else "validation"
     )
     if (
@@ -264,7 +264,7 @@ def validate_runtime_integrity(root: Path) -> list[str]:
         "minimumVersion": "2.35",
     }:
         failures.append("runtime manifest must declare the GLIBC 2.35 contract")
-    if manifest.get("packageSigningState") not in {"unsigned-validation", "platform-signed"}:
+    if manifest.get("packageSigningState") not in {"unsigned-validation", "unsigned-release"}:
         failures.append("runtime manifest packageSigningState is invalid")
     for target, mcp_path in sorted(declared.items()):
         if not isinstance(mcp_path, str):
@@ -293,13 +293,7 @@ def validate_runtime_integrity(root: Path) -> list[str]:
                 continue
             if signature.get("schemaVersion") != 1 or signature.get("target") != target:
                 failures.append(f"runtime manifest {target} signing evidence target is invalid")
-            expected_status = (
-                "signed-and-verified"
-                if manifest.get("packageSigningState") == "platform-signed" and target.startswith("darwin-")
-                else "archive-signature-required"
-                if manifest.get("packageSigningState") == "platform-signed"
-                else "unsigned"
-            )
+            expected_status = "unsigned"
             if signature.get("status") != expected_status:
                 failures.append(f"runtime manifest {target} signing evidence status is invalid")
             evidence_binaries = signature.get("binaries")
@@ -312,28 +306,6 @@ def validate_runtime_integrity(root: Path) -> list[str]:
                     failures.append(f"runtime manifest {target} MCP signing digest differs")
                 if not isinstance(runtime_evidence, dict) or runtime_evidence.get("sha256") != runtime_entry.get("sha256"):
                     failures.append(f"runtime manifest {target} runtime signing digest differs")
-            if expected_status == "signed-and-verified":
-                notarization = signature.get("notarization")
-                if (
-                    not isinstance(signature.get("teamId"), str)
-                    or not signature.get("teamId")
-                    or not isinstance(signature.get("identity"), str)
-                    or not signature.get("identity")
-                    or re.fullmatch(
-                        r"[A-Fa-f0-9]{64}", signature.get("certificateSha256", "")
-                    )
-                    is None
-                    or not isinstance(notarization, dict)
-                    or notarization.get("status") != "Accepted"
-                    or not notarization.get("id")
-                    or not isinstance(evidence_binaries, dict)
-                    or any(
-                        not isinstance(evidence_binaries.get(name), dict)
-                        or not evidence_binaries[name].get("cdhash")
-                        for name in ("loomex", "loomex-mcp")
-                    )
-                ):
-                    failures.append(f"runtime manifest {target} Apple signing evidence is incomplete")
     return failures
 
 
@@ -403,7 +375,8 @@ def validate_marketplace_provenance(
     provenance = read_json(provenance_path, failures)
     marketplace = read_json(root / ".agents/plugins/marketplace.json", failures)
     plugin = read_json(root / "plugins/loomex/.codex-plugin/plugin.json", failures)
-    if provenance is None or marketplace is None or plugin is None:
+    runtime = read_json(root / "plugins/loomex/packaging/runtime-manifest.json", failures)
+    if provenance is None or marketplace is None or plugin is None or runtime is None:
         return failures
     plugins = marketplace.get("plugins")
     if (
@@ -422,6 +395,31 @@ def validate_marketplace_provenance(
     descriptor = provenance.get("marketplace")
     archive_descriptor = provenance.get("archive")
     installer_descriptor = provenance.get("installer")
+    if provenance.get("nativeBinaries") != {
+        "platformSigning": "unsigned",
+        "appleNotarization": "none",
+    }:
+        failures.append("marketplace provenance must declare unsigned, unnotarized native binaries")
+    if provenance.get("releaseIntegrity") != {
+        "checksums": "sha256",
+        "blobSignature": "sigstore-keyless-external",
+    }:
+        failures.append("marketplace provenance release integrity contract is invalid")
+    source_release = provenance.get("sourceRelease")
+    if source_release is not None and (
+        not isinstance(source_release, dict)
+        or re.fullmatch(r"[0-9a-f]{40}", str(source_release.get("sha", ""))) is None
+        or re.fullmatch(r"v[0-9A-Za-z.+-]+", str(source_release.get("tag", ""))) is None
+        or source_release.get("base") not in {"stage", "main"}
+        or isinstance(source_release.get("pullRequest"), bool)
+        or not isinstance(source_release.get("pullRequest"), int)
+        or source_release["pullRequest"] <= 0
+    ):
+        failures.append("marketplace provenance source release identity is invalid")
+    if runtime.get("packageSigningState") == "unsigned-release" and source_release is None:
+        failures.append("release marketplace provenance must bind the source release identity")
+    if runtime.get("packageSigningState") == "unsigned-validation" and source_release is not None:
+        failures.append("validation marketplace provenance must not claim a source release identity")
     if not isinstance(descriptor, dict):
         failures.append("marketplace provenance descriptor is missing")
     else:

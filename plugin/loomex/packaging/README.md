@@ -1,142 +1,97 @@
 # Native package assembly
 
-The repository stores no pretend executable and no made-up signature. A release
-job must build the real `loomex-mcp` adapter and matching `loomex` Runner for
-every macOS/Linux entry in `targets.json`, apply the platform's production
-signing/notarization process, and provide both artifacts to the assembler.
+The repository stores no pretend executable and no made-up signature. CI builds
+the real `loomex-mcp` adapter and matching `loomex` Runner for every macOS/Linux
+entry in `targets.json` and provides both artifacts to the assembler.
 
-After the signed artifacts are present, `codex_plugin_assemble.py` copies both
-binaries into each target directory and creates `runtime-manifest.json` from the
-schema documented by `runtime-manifest.template.json`. The generated manifest
-sets `pluginVersion`, file sizes, lower-case SHA-256 digests of the final signed
-bytes, and signing evidence. It then runs:
+The native executables intentionally carry no OS-vendor signature. In
+particular, macOS binaries are not Developer ID signed and are not notarized.
+Every native `signing.json` and the assembled runtime manifest records the
+binaries as `unsigned` with method `none`; the production package state is
+`unsigned-release`, not a platform-signing claim. macOS Gatekeeper may therefore
+warn or block on first launch after download.
+
+`codex_plugin_assemble.py` copies both binaries into each target directory,
+writes their sizes and lower-case SHA-256 digests into
+`runtime-manifest.json`, and runs:
 
 ```bash
 node scripts/validate-package.mjs --release
 ```
 
-Only the assembled release archive contains `bin/` and
-`packaging/runtime-manifest.json`. Source validation deliberately succeeds
-without them. At launch, the adapter rejects symlinks, unsupported targets,
-missing executability, path escapes, absent manifests, and digest mismatches.
+Only the assembled archive contains `bin/` and the generated runtime manifest.
+Source validation deliberately succeeds without them. At launch, the adapter
+rejects symlinks, unsupported targets, missing executability, path escapes,
+absent manifests, and digest mismatches. Development overrides remain limited
+to source checkouts and cannot replace packaged release bytes.
 
-The release archive is one install for users: it includes every supported
-macOS/Linux MCP adapter and Runner pair. The first `loomex_setup_apply` installs
-the durable per-user Runner from the verified artifact for the current target;
-it does not ask the user to obtain a second installer.
+The archive is one install for users: it includes every supported
+macOS/Linux MCP adapter and Runner pair. The first `loomex_setup_apply` installs the durable
+per-user Runner from the checksum-verified artifact for the current target; it
+does not ask the user to obtain a second installer.
 
-Assembly also creates `loomex-codex-marketplace-<version>.zip` with the Codex
-marketplace layout `.agents/plugins/marketplace.json` plus
-`plugins/loomex/**`, and a companion
-`loomex-codex-marketplace-<version>.provenance.json`. The assembler computes the
-canonical Git tree and orphan commit IDs directly from the packaged bytes with
-a fixed release identity, timestamp, and message. The provenance binds those
-IDs to the plugin version, repository, archive name, and archive SHA-256.
+## Marketplace integrity and publication
 
-Production keyless-signs the archives and provenance with Cosign using GitHub's
-OIDC token and publishes Sigstore bundles. Verification pins both
-`https://token.actions.githubusercontent.com` and the exact
-`loomex-app/runner/.github/workflows/codex-plugin-release.yml@refs/tags/v<version>`
-workflow identity; a public key shipped beside mutable release assets is not a
-trust anchor. The publication job reconstructs the orphan commit, verifies it
-equals the authenticated exact commit, and refuses to replace an existing
-publication ref. The version-named branch is only a discoverability pointer:
-normal installation must verify provenance first and then pass the exact
-40-character `marketplace.commit` to Codex's `--ref`. The source-only plugin
-directory is never published as an installable marketplace entry.
+Assembly creates `loomex-codex-marketplace-<version>.zip`, its installer, and a
+companion provenance document. The provenance binds all of the following:
 
-GitHub Release assets are uploaded only after that exact marketplace commit is
-verified and published. Release publication disables asset overwrite and fails
-closed if any same-version artifact name already exists, so a rerun or reused
-tag cannot replace previously advertised bytes before the commit guard runs.
-Both external-write jobs also resolve the live remote `v<version>` tag
-immediately before pushing the marketplace ref or publishing assets and require
-it to peel to the release-gate SHA. Configure a repository tag ruleset that
-forbids updating or deleting `v*` tags and enable immutable GitHub Releases;
-the runtime checks remain mandatory even when those platform protections are
-enabled. A deleted, recreated, or moved tag fails closed.
+- the plugin version, archive name, and archive SHA-256;
+- the canonical content-addressed Git tree and orphan commit;
+- the exact source release SHA, `v*` tag, `stage` or `main` base, and PR number;
+- the explicit unsigned/unnotarized native-binary state; and
+- the SHA-256 plus keyless Sigstore release-integrity contract.
 
-The current Codex Git-marketplace interface installs an exact Git SHA-1 commit;
-it does not expose a client-side hook for comparing the cloned worktree with the
-signed marketplace ZIP's SHA-256. Release CI therefore proves that the signed
-ZIP, canonical Git tree, and exact commit are equivalent before publication,
-and the online installer verifies signed provenance before passing only that
-commit to Codex. The offline path verifies and installs the signed ZIP itself.
-If Codex adds a persistent verified-snapshot or SHA-256-object interface, the
-online installer should migrate to it.
+Production keyless-signs the plugin archive, marketplace archive, provenance,
+and installer with Cosign using GitHub's short-lived OIDC token. Verification
+pins `https://token.actions.githubusercontent.com` and the exact workflow
+identity. No Loomex private signing key or Apple credential is stored.
 
-Keyless signing has no Loomex private signing key to rotate. Sigstore root
-rotation is consumed only through a reviewed update of the pinned Cosign
-installer/action SHA. A repository or workflow-path change alters the OIDC
-identity and therefore requires a reviewed, simultaneous workflow and install
-documentation update. A compromised release is never “fixed” by moving its
-commit ref: withdraw the release, publish a security advisory and a new signed
-version, and keep the old exact commit identifiable for audit and revocation
-notices.
+The publication job reconstructs the orphan marketplace commit from the
+verified archive and refuses to replace an existing publication ref. The
+version branch is only a discoverability pointer: normal installation must verify provenance first
+and pass the exact 40-character
+`marketplace.commit` to Codex `--ref`. The online and offline installers both
+fail closed before mutation if provenance or Sigstore verification fails.
 
-Linux binaries are built on Ubuntu 22.04 and the release job rejects symbols
-newer than GLIBC 2.35. ARM64 binaries are executed under QEMU before packaging.
-macOS signing evidence records the target, Team ID, notarization acceptance,
-CDHash, and SHA-256 of both transferred native files; assembly rejects evidence
-that does not match the bytes.
+Release assets disable overwrite. Immediately before each external write, CI
+resolves the live remote version tag and requires it to peel to the gated
+release SHA. A moved, deleted, or recreated tag fails closed. Repository rules
+should additionally forbid updating or deleting `v*` tags and enable immutable
+GitHub Releases.
+
+Linux binaries are built on Ubuntu 22.04, reject symbols newer than GLIBC 2.35,
+and execute ARM64 smoke tests under QEMU before packaging.
 
 ## Production release gate
 
-Unsigned validation runs for pull requests and non-production manual runs. A
-`v*` tag or a manual run with `production_release` enabled does not receive any
-release credential merely because it requested production mode. The workflow
-first resolves the requested SHA to a commit and verifies all of the following:
+A `v*` tag or production manual run must resolve to a commit satisfying every
+condition below:
 
-- the commit has exactly two parents;
-- it is the exact `merge_commit_sha` of one merged GitHub pull request whose
-  base is `stage` or `main`;
-- its subject has GitHub's standard `Merge pull request #... from ...` form;
-- it is still reachable from the matching remote base branch; and
-- the merge commit's second parent exactly matches the pull request head; and
-- after reading every review page, at least one non-author reviewer's latest
-  decisive review is `APPROVED` for that exact head commit. An approval for an
-  older head, or one followed by a dismissal or change request, is rejected.
+- exactly two parents;
+- exact `merge_commit_sha` of one merged GitHub PR into `stage` or `main`;
+- GitHub's standard `Merge pull request #... from ...` subject;
+- second parent equal to the PR's exact head SHA; and
+- still reachable from the matching remote base branch.
 
-The same secret-free provenance job queries the GitHub Environments API and
-fails closed unless `codex-plugin-production` has at least one required
-reviewer, prevents self-review, disables administrator bypass
-(`can_admins_bypass` must be exactly `false`), and has custom deployment
-policies for the `stage` and `main` branches and `v*` tags. Missing, null,
-truthy, or non-boolean administrator-bypass state fails closed. Those three
-deployment-policy entries are an exact allowlist: malformed,
-wildcard-broadening, or additional branch/tag policies fail the gate. The gate
-reads every deployment-policy API page and requires the collected count to
-equal one consistent, non-negative `total_count`; truncated or inconsistent
-pagination fails closed. Only after those checks succeed may the workflow enter
-that protected Environment. The Apple signing and notarization jobs and the
-Cosign archive-signing job all reference it. A reviewer must verify the
-successful provenance job before approving the deployment.
+PR approval is not part of this release gate. The provenance job does not read
+PR reviews and the production Environment must not configure a
+`required_reviewers` protection rule.
 
-The required-reviewers rule is schema-checked rather than treated as truthy:
-there must be exactly one such rule with one to six unique `User` or `Team`
-entries, each containing a reviewer object with a positive integer ID. Null,
-empty, boolean-ID, missing-payload, duplicate, unknown-type, and malformed extra
-protection-rule entries fail closed.
+The provenance job still fails closed unless the
+`codex-plugin-production` Environment:
 
-The checkout deliberately uses `persist-credentials: false`. Reachability from
-`stage` or `main` is proven with the authenticated GitHub Compare API using the
-job's short-lived, read-only `GITHUB_TOKEN`; the gate performs no network
-`git fetch`, writes no HTTP authorization header or credential helper into Git
-configuration, and fails closed if the private-repository API check cannot be
-completed.
+- disables administrator bypass (`can_admins_bypass` is exactly `false`);
+- uses custom deployment policies; and
+- exclusively permits branch policies `stage`, `main`, and tag policy `v*`.
 
-Store these values as **environment secrets on
-`codex-plugin-production` only**, never as repository or organization secrets:
+Malformed, missing, broadened, additional, truncated, or inconsistently
+paginated policy data blocks release. `sign-release-archive`,
+`publish-marketplace`, and `publish-release-assets` all reference that
+Environment, so GitHub enforces its branch/tag/admin controls on the release
+jobs themselves. The Environment needs no secrets: Cosign uses the job's
+short-lived OIDC token.
 
-- `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`,
-  `MACOS_SIGNING_IDENTITY`, and `MACOS_KEYCHAIN_PASSWORD`;
-- `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`.
-
-This placement is part of the security boundary: validation and provenance
-jobs cannot read production signing material. Missing environment protection,
-required reviewers, deployment-ref rules, or environment-scoped Apple secrets
-makes the release configuration incomplete and must block a production
-release. Cosign uses the protected job's short-lived GitHub OIDC token rather
-than a stored Loomex signing key. The macOS job deletes the imported certificate
-and temporary keychain in an `always()` cleanup step, including when signing,
-notarization, or evidence generation fails.
+The checkout uses `persist-credentials: false`. Reachability is proven through
+the authenticated GitHub Compare API using a read-only `GITHUB_TOKEN`; the gate
+performs no network `git fetch` and writes no authorization header or credential
+helper into Git configuration.

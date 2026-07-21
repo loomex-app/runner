@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# The official package supports macOS and Linux, both of which provide
+# The packaged release supports macOS and Linux, both of which provide
 # /bin/sh. Keep this bootstrap dependency-free: it runs before Loomex can
 # expose any MCP tools, so relying on a host Node/Python installation would
 # turn an otherwise self-contained package into a multi-install experience.
@@ -23,8 +23,8 @@ assert_executable() {
 }
 
 # Source checkouts intentionally have no runtime manifest. Development
-# overrides are accepted only there. An assembled official package always has
-# the manifest, so LOOMEX_MCP_BINARY cannot replace signed package bytes.
+# overrides are accepted only there. An assembled release always has the
+# manifest, so LOOMEX_MCP_BINARY cannot replace checksum-bound package bytes.
 if [ ! -f "$manifest" ]; then
   [ "${LOOMEX_ALLOW_DEVELOPMENT_BINARY:-}" = "1" ] || \
     fail "source checkouts require LOOMEX_ALLOW_DEVELOPMENT_BINARY=1"
@@ -43,7 +43,7 @@ case "$(uname -s 2>/dev/null || true)" in
     glibc_report=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
     case "$glibc_report" in
       "glibc "*) glibc_version=${glibc_report#glibc } ;;
-      *) fail "official Linux packages require GLIBC 2.35 or newer" ;;
+      *) fail "packaged Linux releases require GLIBC 2.35 or newer" ;;
     esac
     glibc_major=${glibc_version%%.*}
     glibc_minor=${glibc_version#*.}
@@ -52,7 +52,7 @@ case "$(uname -s 2>/dev/null || true)" in
       *[!0-9:]*) fail "cannot determine the host GLIBC version" ;;
     esac
     if [ "$glibc_major" -lt 2 ] || { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -lt 35 ]; }; then
-      fail "official Linux packages require GLIBC 2.35 or newer; found $glibc_version"
+      fail "packaged Linux releases require GLIBC 2.35 or newer; found $glibc_version"
     fi
     ;;
   *) fail "this package supports only macOS and Linux" ;;

@@ -72,7 +72,7 @@ async function verifyArtifact(candidate, root, entry, expectedPath, label) {
     if (error?.code === "ENOENT") {
       throw new Error(
         `The Loomex plugin package does not contain ${expectedPath}. ` +
-          "Reinstall the official plugin package. Source checkouts require explicit development binaries.",
+          "Reinstall the packaged plugin release. Source checkouts require explicit development binaries.",
         { cause: error },
       );
     }
@@ -98,7 +98,7 @@ async function loadRuntimeManifest(root) {
   } catch (error) {
     throw new Error(
       `The Loomex release integrity manifest is missing or invalid at ${manifestPath}. ` +
-        "Reinstall the Loomex plugin from its official package.",
+        "Reinstall the Loomex plugin from its packaged release.",
       { cause: error },
     );
   }
@@ -145,8 +145,8 @@ export async function resolveDevelopmentBinary(root, env = process.env) {
     const manifest = JSON.parse(
       await readFile(path.join(root, "packaging", "runtime-manifest.json"), "utf8"),
     );
-    if (manifest?.distributionKind === "official" || manifest?.developmentOverridesAllowed === false) {
-      throw new Error("Development binary overrides are disabled in official Loomex packages.");
+    if (manifest?.distributionKind === "release" || manifest?.developmentOverridesAllowed === false) {
+      throw new Error("Development binary overrides are disabled in packaged Loomex releases.");
     }
     throw new Error("A packaged Loomex runtime manifest may not enable development overrides.");
   } catch (error) {

@@ -48,7 +48,7 @@ if (
   template?.linuxRuntimeContract?.libc !== "glibc" ||
   template?.linuxRuntimeContract?.minimumVersion !== "2.35"
 ) {
-  failures.push("runtime manifest template must declare the base runtime version and official package policy");
+  failures.push("runtime manifest template must declare the base runtime version and packaged-release policy");
 }
 if (JSON.stringify(Object.keys(template?.artifacts ?? {}).sort()) !== JSON.stringify(Object.keys(TARGETS).sort())) {
   failures.push("runtime manifest template must exactly match the supported target matrix");
@@ -91,7 +91,10 @@ if (release) {
   if (manifest?.schemaVersion !== 1) failures.push("runtime manifest schemaVersion must be 1");
   if (manifest?.pluginVersion !== plugin?.version) failures.push("runtime manifest pluginVersion must match plugin.json");
   if (manifest?.runtimeVersion !== plugin?.version?.split("+", 1)[0]) failures.push("runtime manifest runtimeVersion must match plugin base version");
-  const expectedDistribution = manifest?.packageSigningState === "platform-signed" ? "official" : "validation";
+  const expectedDistribution = manifest?.packageSigningState === "unsigned-release" ? "release" : "validation";
+  if (!["unsigned-validation", "unsigned-release"].includes(manifest?.packageSigningState)) {
+    failures.push("runtime manifest packageSigningState must describe an unsigned validation or release package");
+  }
   if (manifest?.distributionKind !== expectedDistribution || manifest?.developmentOverridesAllowed !== false) {
     failures.push("package distribution kind/signing state must agree and development overrides must be disabled");
   }

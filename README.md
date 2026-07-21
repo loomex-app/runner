@@ -106,6 +106,12 @@ Release artifacts are verified through signed manifests, SHA-256 checksums,
 artifact signatures, SBOM entries, and build provenance. `loomex runner release`
 provides the local signing and verification helpers used by release CI:
 
+The Codex plugin release is a distinct path: its native macOS/Linux binaries
+are unsigned at the platform level and macOS binaries are not notarized. The
+published archives, marketplace provenance, and installer are protected with
+SHA-256 and keyless Sigstore bundles. macOS Gatekeeper may therefore require a
+manual first-run authorization after the user verifies those release records.
+
 ```bash
 loomex runner release sign-artifact --name loomex-cli-macos-aarch64 --os macos --arch aarch64 --path target/release/loomex --signing-key-env LOOMEX_RELEASE_SIGNING_KEY
 loomex runner release sign-manifest --manifest release-manifest.json --signing-key-env LOOMEX_RELEASE_SIGNING_KEY

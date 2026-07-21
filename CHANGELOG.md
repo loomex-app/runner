@@ -8,7 +8,8 @@
 - Allow setup plans to be created locally before authentication is repaired.
 - Report durable runner-control health instead of the retired gRPC stream check.
 - Use port `28000` for the local backend while preserving customized server URLs.
-- Strengthen signed plugin packaging, provenance verification, and rollback-safe installation.
+- Publish the plugin with SHA-256 checksums, source-bound provenance, and keyless Sigstore bundles.
+- Record macOS/Linux plugin binaries honestly as unsigned and macOS artifacts as unnotarized.
 
 ## 0.1.0 - 2026-07-20
 

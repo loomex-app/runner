@@ -1073,7 +1073,7 @@ class AssemblePluginTest(unittest.TestCase):
                 "pluginVersion": None,
                 "runtimeVersion": "9.8.7",
                 "channel": "stable",
-                "distributionKind": "official",
+                "distributionKind": "validation",
                 "developmentOverridesAllowed": False,
                 "linuxRuntimeContract": {"libc": "glibc", "minimumVersion": "2.35"},
                 "artifacts": {},
@@ -1104,29 +1104,20 @@ class AssemblePluginTest(unittest.TestCase):
             )
             self.write_signing_marker(target)
 
-    def write_signing_marker(self, target: str, *, signed: bool = False) -> None:
+    def write_signing_marker(self, target: str) -> None:
         directory = self.artifacts / target
         runtime = directory / "loomex"
         mcp = directory / "loomex-mcp"
         payload = {
             "schemaVersion": 1,
             "target": target,
-            "status": "signed-and-verified" if signed and target.startswith("darwin-") else "archive-signature-required" if signed else "unsigned",
-            "method": "test-platform-signer" if signed else "none",
+            "status": "unsigned",
+            "method": "none",
             "binaries": {
                 "loomex": {"sha256": hashlib.sha256(runtime.read_bytes()).hexdigest()},
                 "loomex-mcp": {"sha256": hashlib.sha256(mcp.read_bytes()).hexdigest()},
             },
         }
-        if signed and target.startswith("darwin-"):
-            payload.update({
-                "teamId": "TESTTEAM",
-                "identity": "Test Identity",
-                "certificateSha256": "A" * 64,
-                "notarization": {"status": "Accepted", "id": "test-submission"},
-            })
-            payload["binaries"]["loomex"]["cdhash"] = "abc"
-            payload["binaries"]["loomex-mcp"]["cdhash"] = "def"
         (directory / "signing.json").write_text(json.dumps(payload), encoding="utf-8")
 
     def tearDown(self) -> None:
@@ -1354,25 +1345,49 @@ class AssemblePluginTest(unittest.TestCase):
             failures,
         )
 
-    def test_release_refuses_missing_platform_signature_markers(self) -> None:
-        result = self.assemble(
-            "--require-platform-signatures", "--signing-state", "platform-signed"
-        )
+    def test_unsigned_release_requires_complete_source_provenance(self) -> None:
+        result = self.assemble("--signing-state", "unsigned-release")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("signing evidence status must be", result.stderr)
+        self.assertIn("require complete source release provenance", result.stderr)
 
-    def test_release_accepts_verified_platform_signature_markers(self) -> None:
-        for target in ("darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"):
-            self.write_signing_marker(target, signed=True)
+    def test_unsigned_release_records_source_and_platform_limitations(self) -> None:
         result = self.assemble(
-            "--require-platform-signatures", "--signing-state", "platform-signed"
+            "--signing-state", "unsigned-release",
+            "--source-release-sha", "a" * 40,
+            "--source-release-tag", "v9.8.7",
+            "--source-release-base", "main",
+            "--source-release-pr", "42",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        runtime = json.loads(
+            (self.temp / "dist/loomex/packaging/runtime-manifest.json").read_text()
+        )
+        self.assertEqual(runtime["distributionKind"], "release")
+        self.assertEqual(runtime["packageSigningState"], "unsigned-release")
+        for entry in runtime["artifacts"].values():
+            self.assertEqual(entry["platformSignature"]["status"], "unsigned")
+            self.assertEqual(entry["platformSignature"]["method"], "none")
+        provenance = json.loads(
+            (self.temp / "loomex-marketplace.provenance.json").read_text()
+        )
+        self.assertEqual(
+            provenance["sourceRelease"],
+            {"sha": "a" * 40, "tag": "v9.8.7", "base": "main", "pullRequest": 42},
+        )
+        self.assertEqual(
+            provenance["nativeBinaries"],
+            {"platformSigning": "unsigned", "appleNotarization": "none"},
+        )
 
-    def test_platform_signed_state_cannot_omit_required_signature_validation(self) -> None:
-        result = self.assemble("--signing-state", "platform-signed")
+    def test_validation_package_rejects_source_release_claims(self) -> None:
+        result = self.assemble(
+            "--source-release-sha", "a" * 40,
+            "--source-release-tag", "v9.8.7",
+            "--source-release-base", "main",
+            "--source-release-pr", "42",
+        )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("require --require-platform-signatures", result.stderr)
+        self.assertIn("only valid for unsigned-release", result.stderr)
 
     def test_signing_evidence_is_bound_to_native_bytes(self) -> None:
         marker = json.loads((self.artifacts / "darwin-arm64/signing.json").read_text())

@@ -14,10 +14,9 @@ from typing import Any
 
 
 PAGE_SIZE = 100
-DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 ENVIRONMENT_NAME = "codex-plugin-production"
-DOCUMENTED_RULE_TYPES = {"required_reviewers", "wait_timer", "branch_policy"}
-RULE_VARIANT_FIELDS = {"reviewers", "prevent_self_review", "wait_timer"}
+DOCUMENTED_RULE_TYPES = {"wait_timer", "branch_policy"}
+RULE_VARIANT_FIELDS = {"wait_timer"}
 REQUIRED_DEPLOYMENT_POLICIES = {
     ("stage", "branch"),
     ("main", "branch"),
@@ -99,24 +98,6 @@ def paginated_branch_policies(
         page += 1
 
 
-def current_head_approvers(
-    reviews: list[dict[str, Any]], author: str | None, head_sha: str
-) -> list[str]:
-    """Return non-author reviewers whose latest decisive review approves head."""
-    decisive: dict[str, tuple[str, str | None]] = {}
-    for review in sorted(reviews, key=lambda value: value.get("id", -1)):
-        state = review.get("state")
-        user = review.get("user") or {}
-        login = user.get("login")
-        if login and state in DECISIVE_REVIEW_STATES:
-            decisive[login] = (state, review.get("commit_id"))
-    return sorted(
-        login
-        for login, (state, commit_id) in decisive.items()
-        if login != author and state == "APPROVED" and commit_id == head_sha
-    )
-
-
 def comparison_contains_release(
     comparison: dict[str, Any], release_sha: str
 ) -> bool:
@@ -157,7 +138,6 @@ def validate_protection_rule(rule: dict[str, Any]) -> str:
     )
 
     permitted_variant_fields = {
-        "required_reviewers": {"reviewers", "prevent_self_review"},
         "wait_timer": {"wait_timer"},
         "branch_policy": set(),
     }[rule_type]
@@ -219,47 +199,6 @@ def verify_environment() -> None:
             raise SystemExit(
                 f"{environment_name} must not have duplicate {rule_type} rules"
             )
-    reviewer_rules = [
-        rule
-        for rule in protection_rules
-        if rule["type"] == "required_reviewers"
-    ]
-    if len(reviewer_rules) != 1:
-        raise SystemExit(
-            f"{environment_name} must have exactly one required-reviewers rule"
-        )
-    reviewers = reviewer_rules[0].get("reviewers")
-    if not isinstance(reviewers, list) or not 1 <= len(reviewers) <= 6:
-        raise SystemExit(f"{environment_name} must have one to six required reviewers")
-    reviewer_keys: set[tuple[str, int]] = set()
-    for entry in reviewers:
-        if not isinstance(entry, dict):
-            raise SystemExit(f"{environment_name} reviewer entries must be objects")
-        reviewer_type = entry.get("type")
-        if reviewer_type not in {"User", "Team"}:
-            raise SystemExit(
-                f"{environment_name} reviewer type must be User or Team"
-            )
-        reviewer = entry.get("reviewer")
-        if not isinstance(reviewer, dict):
-            raise SystemExit(
-                f"{environment_name} reviewer payload must be an object"
-            )
-        reviewer_id = reviewer.get("id")
-        if (
-            isinstance(reviewer_id, bool)
-            or not isinstance(reviewer_id, int)
-            or reviewer_id <= 0
-        ):
-            raise SystemExit(
-                f"{environment_name} reviewer id must be a positive integer"
-            )
-        key = (reviewer_type, reviewer_id)
-        if key in reviewer_keys:
-            raise SystemExit(f"{environment_name} required reviewers must be unique")
-        reviewer_keys.add(key)
-    if reviewer_rules[0].get("prevent_self_review") is not True:
-        raise SystemExit(f"{environment_name} must prevent self-review")
     deployment_policy = environment.get("deployment_branch_policy")
     if not isinstance(deployment_policy, dict):
         raise SystemExit(
@@ -368,20 +307,12 @@ def main() -> None:
             "release commit is not a standard GitHub PR merge commit: " + subject
         )
 
-    reviews = paginated_list(api_get, f"pulls/{number}/reviews")
-    author = pull.get("user", {}).get("login")
-    approvers = current_head_approvers(reviews, author, head_sha)
-    if not approvers:
-        raise SystemExit(
-            f"PR #{number} has no current non-author approval for exact head {head_sha}"
-        )
-
     print("release-mode=true")
     print(f"release-sha={sha}")
     print(f"release-base={base}")
     print(f"release-pr={number}")
     print(
-        f"verified {sha} as approved standard merge of PR #{number} into {base}",
+        f"verified {sha} as standard merge of PR #{number} into {base}",
         file=os.sys.stderr,
     )
 

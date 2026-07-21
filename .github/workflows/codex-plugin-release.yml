@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       production_release:
-        description: Require platform signing and publish a signed workflow artifact
+        description: Publish a checksum- and Sigstore-protected production release
         type: boolean
         required: true
         default: false
@@ -119,7 +119,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Require an approved standard PR merge on stage or main
+      - name: Require a standard PR merge on stage or main
         id: gate
         shell: bash
         env:
@@ -258,206 +258,39 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  production-native:
-    name: Sign production native artifact ${{ matrix.package_target }}
-    if: needs.release-provenance.outputs.release-mode == 'true'
-    needs: [release-provenance, native-build]
-    runs-on: ${{ matrix.os }}
-    environment:
-      name: codex-plugin-production
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            package_target: darwin-arm64
-            platform_signing: apple
-          - os: macos-14
-            package_target: darwin-x64
-            platform_signing: apple
-          - os: ubuntu-22.04
-            package_target: linux-x64
-            platform_signing: archive
-          - os: ubuntu-22.04
-            package_target: linux-arm64
-            platform_signing: archive
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: loomex-unsigned-native-${{ matrix.package_target }}
-          path: ${{ runner.temp }}/native/${{ matrix.package_target }}
-      - name: Require and import Apple release credentials
-        if: matrix.platform_signing == 'apple'
-        shell: bash
-        env:
-          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
-        run: |
-          set -euo pipefail
-          test -n "$MACOS_CERTIFICATE_P12_BASE64"
-          test -n "$MACOS_CERTIFICATE_PASSWORD"
-          test -n "$MACOS_SIGNING_IDENTITY"
-          test -n "$APPLE_TEAM_ID"
-          test -n "$KEYCHAIN_PASSWORD"
-          cert_path="$RUNNER_TEMP/loomex-signing.p12"
-          keychain_path="$RUNNER_TEMP/loomex-signing.keychain-db"
-          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | openssl base64 -d -A -out "$cert_path"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security import "$cert_path" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
-          security list-keychain -d user -s "$keychain_path"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
-          for binary in loomex loomex-mcp; do
-            codesign --force --options runtime --timestamp --sign "$MACOS_SIGNING_IDENTITY" \
-              "$RUNNER_TEMP/native/${{ matrix.package_target }}/$binary"
-            codesign --verify --deep --strict --verbose=2 \
-              "$RUNNER_TEMP/native/${{ matrix.package_target }}/$binary"
-          done
-          actual_team="$(codesign -dvv "$RUNNER_TEMP/native/${{ matrix.package_target }}/loomex" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-          test "$actual_team" = "$APPLE_TEAM_ID"
-          certificate_sha256="$(security find-certificate -c "$MACOS_SIGNING_IDENTITY" -Z "$keychain_path" | sed -n 's/^SHA-256 hash: //p' | head -1)"
-          test -n "$certificate_sha256"
-          echo "LOOMEX_SIGNING_TEAM=$actual_team" >> "$GITHUB_ENV"
-          echo "LOOMEX_SIGNING_IDENTITY=$MACOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
-          echo "LOOMEX_SIGNING_CERT_SHA256=$certificate_sha256" >> "$GITHUB_ENV"
-      - name: Notarize Apple production binaries
-        if: matrix.platform_signing == 'apple'
-        shell: bash
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          test -n "$APPLE_ID"
-          test -n "$APPLE_APP_SPECIFIC_PASSWORD"
-          test -n "$APPLE_TEAM_ID"
-          notarize_dir="$RUNNER_TEMP/loomex-notarize"
-          mkdir -p "$notarize_dir"
-          cp "$RUNNER_TEMP/native/${{ matrix.package_target }}/loomex" "$notarize_dir/"
-          cp "$RUNNER_TEMP/native/${{ matrix.package_target }}/loomex-mcp" "$notarize_dir/"
-          ditto -c -k --keepParent "$notarize_dir" "$RUNNER_TEMP/loomex-notarize.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/loomex-notarize.zip" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait --output-format json > "$RUNNER_TEMP/notarization.json"
-          python3 -c 'import json,os; value=json.load(open(os.environ["RUNNER_TEMP"]+"/notarization.json")); assert value["status"] == "Accepted"; assert value["id"]'
-          for binary in loomex loomex-mcp; do
-            path="$RUNNER_TEMP/native/${{ matrix.package_target }}/$binary"
-            codesign --verify --deep --strict --verbose=2 "$path"
-            test "$(codesign -dvv "$path" 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "$APPLE_TEAM_ID"
-          done
-      - name: Record verified production signing evidence
-        shell: bash
-        env:
-          NATIVE_DIR: ${{ runner.temp }}/native/${{ matrix.package_target }}
-          PACKAGE_TARGET: ${{ matrix.package_target }}
-          PLATFORM_SIGNING: ${{ matrix.platform_signing }}
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, os, pathlib, subprocess
-          root = pathlib.Path(os.environ["NATIVE_DIR"])
-          apple = os.environ["PLATFORM_SIGNING"] == "apple"
-          def sha(name): return hashlib.sha256((root / name).read_bytes()).hexdigest()
-          value = {
-              "schemaVersion": 1,
-              "target": os.environ["PACKAGE_TARGET"],
-              "status": "signed-and-verified" if apple else "archive-signature-required",
-              "method": "apple-codesign-and-notary" if apple else "cosign-archive",
-              "binaries": {"loomex": {"sha256": sha("loomex")}, "loomex-mcp": {"sha256": sha("loomex-mcp")}},
-          }
-          if apple:
-              notarization = json.load(open(os.environ["RUNNER_TEMP"] + "/notarization.json"))
-              value.update({
-                  "teamId": os.environ["LOOMEX_SIGNING_TEAM"],
-                  "identity": os.environ["LOOMEX_SIGNING_IDENTITY"],
-                  "certificateSha256": os.environ["LOOMEX_SIGNING_CERT_SHA256"],
-                  "notarization": {"id": notarization["id"], "status": notarization["status"]},
-              })
-              for name in ("loomex", "loomex-mcp"):
-                  details = subprocess.run(["codesign", "-dvv", str(root / name)], text=True, capture_output=True, check=True).stderr
-                  value["binaries"][name]["cdhash"] = next(line.split("=",1)[1] for line in details.splitlines() if line.startswith("CDHash="))
-          (root / "signing.json").write_text(json.dumps(value, sort_keys=True) + "\n")
-          PY
-      - name: Remove imported Apple signing credentials
-        if: always() && matrix.platform_signing == 'apple'
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "$RUNNER_TEMP"
-          cert_path="$RUNNER_TEMP/loomex-signing.p12"
-          keychain_path="$RUNNER_TEMP/loomex-signing.keychain-db"
-          case "$cert_path:$keychain_path" in
-            "$RUNNER_TEMP"/*:"$RUNNER_TEMP"/*) ;;
-            *) echo "refusing to clean signing credentials outside RUNNER_TEMP" >&2; exit 1 ;;
-          esac
-          security delete-keychain "$keychain_path" 2>/dev/null || true
-          rm -f -- "$cert_path" "$keychain_path"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: loomex-release-native-${{ matrix.package_target }}
-          path: ${{ runner.temp }}/native/${{ matrix.package_target }}
-          if-no-files-found: error
-          retention-days: 7
-
   verify-native-artifacts:
     name: Revalidate transferred native artifacts
-    if: >-
-      always() && needs.native-build.result == 'success' &&
-      (needs.release-provenance.outputs.release-mode != 'true' || needs.production-native.result == 'success')
-    needs: [release-provenance, native-build, production-native]
-    runs-on: macos-14
-    env:
-      RELEASE_MODE: ${{ needs.release-provenance.outputs.release-mode }}
+    needs: [release-provenance, native-build]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: env.RELEASE_MODE != 'true'
         with:
           pattern: loomex-unsigned-native-*
           path: native
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: env.RELEASE_MODE == 'true'
-        with:
-          pattern: loomex-release-native-*
-          path: native
-      - name: Verify evidence, digests, and Apple signatures after transfer
+      - name: Verify unsigned-platform evidence and digests after transfer
         shell: bash
         run: |
           python3 - <<'PY'
-          import hashlib, json, os, pathlib, subprocess
+          import hashlib, json, pathlib
           root = pathlib.Path("native")
-          release = os.environ["RELEASE_MODE"] == "true"
           targets = ("darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64")
           for target in targets:
-              kind = "release" if release else "unsigned"
-              candidates = [root / target, root / f"loomex-{kind}-native-{target}"]
+              candidates = [root / target, root / f"loomex-unsigned-native-{target}"]
               directory = next((path for path in candidates if path.is_dir()), None)
               assert directory is not None, f"missing {target}"
               evidence = json.loads((directory / "signing.json").read_text())
               assert evidence["schemaVersion"] == 1 and evidence["target"] == target
-              expected_status = "signed-and-verified" if release and target.startswith("darwin-") else "archive-signature-required" if release else "unsigned"
-              assert evidence["status"] == expected_status
+              assert evidence["status"] == "unsigned" and evidence["method"] == "none"
               for name in ("loomex", "loomex-mcp"):
                   binary = directory / name
                   actual = hashlib.sha256(binary.read_bytes()).hexdigest()
                   assert evidence["binaries"][name]["sha256"] == actual
-                  if expected_status == "signed-and-verified":
-                      subprocess.run(["codesign", "--verify", "--deep", "--strict", str(binary)], check=True)
-                      details = subprocess.run(["codesign", "-dvv", str(binary)], text=True, capture_output=True, check=True).stderr.splitlines()
-                      fields = dict(line.split("=", 1) for line in details if "=" in line)
-                      assert fields["TeamIdentifier"] == evidence["teamId"]
-                      assert fields["CDHash"] == evidence["binaries"][name]["cdhash"]
           PY
 
   assemble:
     name: Assemble and validate universal plugin
     if: always() && needs.verify-native-artifacts.result == 'success'
-    needs: [release-provenance, native-build, production-native, verify-native-artifacts]
+    needs: [release-provenance, native-build, verify-native-artifacts]
     runs-on: ubuntu-latest
     env:
       RELEASE_MODE: ${{ needs.release-provenance.outputs.release-mode }}
@@ -483,26 +316,15 @@ jobs:
       - name: Install official validator dependency
         run: python3 -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: env.RELEASE_MODE != 'true'
         with:
           pattern: loomex-unsigned-native-*
-          path: native
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: env.RELEASE_MODE == 'true'
-        with:
-          pattern: loomex-release-native-*
           path: native
       - name: Normalize downloaded native artifact directories
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$RELEASE_MODE" = "true" ]; then
-            kind=release
-          else
-            kind=unsigned
-          fi
           for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
-            source="native/loomex-$kind-native-$target"
+            source="native/loomex-unsigned-native-$target"
             test -d "$source"
             mv "$source" "native/$target"
           done
@@ -520,7 +342,7 @@ jobs:
           marketplace_provenance="loomex-codex-marketplace-$version.provenance.json"
           marketplace_installer="loomex-install-marketplace-$version.sh"
           if [ "$RELEASE_MODE" = "true" ]; then
-            artifact_name="loomex-codex-plugin-$version-platform-signed"
+            artifact_name="loomex-codex-plugin-$version-unsigned-platform"
           else
             artifact_name="loomex-codex-plugin-$version-UNSIGNED-VALIDATION-ONLY"
           fi
@@ -544,7 +366,13 @@ jobs:
             --version "${{ steps.metadata.outputs.version }}"
           )
           if [ "$RELEASE_MODE" = "true" ]; then
-            args+=(--signing-state platform-signed --require-platform-signatures)
+            args+=(
+              --signing-state unsigned-release
+              --source-release-sha "${{ needs.release-provenance.outputs.release-sha }}"
+              --source-release-tag "$GITHUB_REF_NAME"
+              --source-release-base "${{ needs.release-provenance.outputs.release-base }}"
+              --source-release-pr "${{ needs.release-provenance.outputs.release-pr }}"
+            )
           else
             args+=(--signing-state unsigned-validation)
           fi
@@ -623,7 +451,7 @@ jobs:
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: loomex-codex-plugin-${{ needs.assemble.outputs.version }}-SIGNED
+          name: loomex-codex-plugin-${{ needs.assemble.outputs.version }}-SIGSTORE-SIGNED
           path: |
             release/${{ needs.assemble.outputs.archive }}
             release/${{ needs.assemble.outputs.archive }}.sha256
@@ -642,6 +470,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') && needs.sign-release-archive.result == 'success'
     needs: [release-provenance, assemble, sign-release-archive]
     runs-on: ubuntu-latest
+    environment:
+      name: codex-plugin-production
     permissions:
       contents: write
     steps:
@@ -650,7 +480,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: loomex-codex-plugin-${{ needs.assemble.outputs.version }}-SIGNED
+          name: loomex-codex-plugin-${{ needs.assemble.outputs.version }}-SIGSTORE-SIGNED
           path: ${{ runner.temp }}/release
       - uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
       - name: Publish content-addressed assembled marketplace tree
@@ -676,6 +506,20 @@ jobs:
           value = json.load(open(sys.argv[1], encoding="utf-8"))
           assert value["schemaVersion"] == 1
           assert value["pluginVersion"] == sys.argv[2]
+          assert value["nativeBinaries"] == {
+              "platformSigning": "unsigned",
+              "appleNotarization": "none",
+          }
+          assert value["releaseIntegrity"] == {
+              "checksums": "sha256",
+              "blobSignature": "sigstore-keyless-external",
+          }
+          assert value["sourceRelease"] == {
+              "sha": "${{ needs.release-provenance.outputs.release-sha }}",
+              "tag": "${{ github.ref_name }}",
+              "base": "${{ needs.release-provenance.outputs.release-base }}",
+              "pullRequest": int("${{ needs.release-provenance.outputs.release-pr }}"),
+          }
           marketplace = value["marketplace"]
           assert marketplace["repository"] == "loomex-app/runner"
           assert marketplace["gitObjectFormat"] == "sha1"
@@ -741,16 +585,18 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish-release-assets:
-    name: Publish immutable signed release assets
+    name: Publish immutable Sigstore-signed release assets
     if: startsWith(github.ref, 'refs/tags/v') && needs.publish-marketplace.result == 'success'
     needs: [release-provenance, assemble, sign-release-archive, publish-marketplace]
     runs-on: ubuntu-latest
+    environment:
+      name: codex-plugin-production
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: loomex-codex-plugin-${{ needs.assemble.outputs.version }}-SIGNED
+          name: loomex-codex-plugin-${{ needs.assemble.outputs.version }}-SIGSTORE-SIGNED
           path: release
       - uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
       - name: Reverify signed blobs and reject existing same-version assets

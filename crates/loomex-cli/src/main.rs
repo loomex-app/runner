@@ -3439,7 +3439,7 @@ fn plugin_package_runtime() -> Result<PluginPackageRuntime, String> {
     let signing_state = manifest
         .get("packageSigningState")
         .and_then(Value::as_str)
-        .filter(|value| matches!(*value, "unsigned-validation" | "platform-signed"))
+        .filter(|value| matches!(*value, "unsigned-validation" | "unsigned-release"))
         .ok_or_else(|| {
             "PLUGIN_RUNTIME_MANIFEST_INVALID: packageSigningState is invalid".to_string()
         })?
@@ -3528,7 +3528,7 @@ fn validate_plugin_distribution(
     allow_unsigned_validation: bool,
 ) -> Result<(), String> {
     match (distribution_kind, signing_state) {
-        ("official", "platform-signed") => Ok(()),
+        ("release", "unsigned-release") => Ok(()),
         ("validation", "unsigned-validation") if allow_unsigned_validation => Ok(()),
         ("validation", "unsigned-validation") => Err(format!(
             "PLUGIN_PACKAGE_UNSIGNED_VALIDATION_ONLY: set {ALLOW_UNSIGNED_PLUGIN_ENV}=1 only in an isolated release-validation environment"
@@ -3543,7 +3543,7 @@ fn validate_plugin_distribution(
 fn plugin_self_test_runtime_bytes(bytes: &[u8], expected_sha256: &str) -> Result<(), String> {
     if sha256_hex(bytes) != expected_sha256 {
         return Err(
-            "PLUGIN_RUNTIME_CHECKSUM_MISMATCH: bundled runtime differs from the signed manifest"
+            "PLUGIN_RUNTIME_CHECKSUM_MISMATCH: bundled runtime differs from the integrity manifest"
                 .to_string(),
         );
     }
@@ -15192,8 +15192,9 @@ mod tests {
             validate_plugin_distribution("validation", "unsigned-validation", false).unwrap_err();
         assert!(error.contains("PLUGIN_PACKAGE_UNSIGNED_VALIDATION_ONLY"));
         validate_plugin_distribution("validation", "unsigned-validation", true).unwrap();
-        validate_plugin_distribution("official", "platform-signed", false).unwrap();
-        assert!(validate_plugin_distribution("official", "unsigned-validation", true).is_err());
+        validate_plugin_distribution("release", "unsigned-release", false).unwrap();
+        assert!(validate_plugin_distribution("release", "unsigned-validation", true).is_err());
+        assert!(validate_plugin_distribution("validation", "unsigned-release", true).is_err());
     }
 
     fn temp_config_path(label: &str) -> PathBuf {

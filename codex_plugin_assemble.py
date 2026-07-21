@@ -67,15 +67,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", required=True)
     parser.add_argument(
         "--signing-state",
-        choices=("unsigned-validation", "platform-signed"),
+        choices=("unsigned-validation", "unsigned-release"),
         default="unsigned-validation",
-        help="Descriptive state recorded in the manifest; this does not sign bytes.",
+        help="Describes unsigned native bytes for validation or a Sigstore release.",
     )
-    parser.add_argument(
-        "--require-platform-signatures",
-        action="store_true",
-        help="Require signed marker metadata from macOS build jobs.",
-    )
+    parser.add_argument("--source-release-sha")
+    parser.add_argument("--source-release-tag")
+    parser.add_argument("--source-release-base")
+    parser.add_argument("--source-release-pr")
     return parser.parse_args()
 
 
@@ -152,6 +151,7 @@ def write_marketplace_provenance(
     marketplace_installer: Path,
     provenance_path: Path,
     version: str,
+    source_release: dict[str, object] | None,
 ) -> dict:
     commit, tree = marketplace_commit(marketplace_root, version)
     value = {
@@ -175,7 +175,17 @@ def write_marketplace_provenance(
             "name": marketplace_installer.name,
             "sha256": digest(marketplace_installer),
         },
+        "nativeBinaries": {
+            "platformSigning": "unsigned",
+            "appleNotarization": "none",
+        },
+        "releaseIntegrity": {
+            "checksums": "sha256",
+            "blobSignature": "sigstore-keyless-external",
+        },
     }
+    if source_release is not None:
+        value["sourceRelease"] = source_release
     provenance_path.parent.mkdir(parents=True, exist_ok=True)
     provenance_path.write_text(
         json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -232,13 +242,7 @@ def signature_metadata(
 
     if metadata.get("schemaVersion") != 1 or metadata.get("target") != target:
         raise AssemblyError(f"{target} signing evidence has an invalid schema or target")
-    expected_status = (
-        "signed-and-verified"
-        if signing_state == "platform-signed" and target.startswith("darwin-")
-        else "archive-signature-required"
-        if signing_state == "platform-signed"
-        else "unsigned"
-    )
+    expected_status = "unsigned"
     if metadata.get("status") != expected_status:
         raise AssemblyError(
             f"{target} signing evidence status must be {expected_status!r}"
@@ -251,20 +255,6 @@ def signature_metadata(
         for name, value in expected.items()
     ):
         raise AssemblyError(f"{target} signing evidence is not bound to the native bytes")
-    if expected_status == "signed-and-verified":
-        notarization = metadata.get("notarization")
-        if (
-            not isinstance(metadata.get("teamId"), str)
-            or not metadata["teamId"]
-            or not isinstance(metadata.get("identity"), str)
-            or not metadata["identity"]
-            or not re.fullmatch(r"[A-Fa-f0-9]{64}", metadata.get("certificateSha256", ""))
-            or not isinstance(notarization, dict)
-            or notarization.get("status") != "Accepted"
-            or not notarization.get("id")
-            or any(not binaries[name].get("cdhash") for name in expected)
-        ):
-            raise AssemblyError(f"{target} has incomplete platform-signing evidence")
     return metadata
 
 
@@ -420,14 +410,32 @@ def assemble(args: argparse.Namespace) -> Path:
         )
     if SEMVER_RE.fullmatch(args.version) is None:
         raise AssemblyError("plugin version must be strict semver")
-    if args.signing_state == "platform-signed" and not args.require_platform_signatures:
-        raise AssemblyError(
-            "platform-signed packages require --require-platform-signatures"
-        )
-    if args.signing_state == "unsigned-validation" and args.require_platform_signatures:
-        raise AssemblyError(
-            "--require-platform-signatures requires --signing-state platform-signed"
-        )
+    source_values = (
+        args.source_release_sha,
+        args.source_release_tag,
+        args.source_release_base,
+        args.source_release_pr,
+    )
+    if args.signing_state == "unsigned-release" and any(value is None for value in source_values):
+        raise AssemblyError("unsigned-release packages require complete source release provenance")
+    if args.signing_state == "unsigned-validation" and any(value is not None for value in source_values):
+        raise AssemblyError("source release provenance is only valid for unsigned-release packages")
+    source_release = None
+    if args.signing_state == "unsigned-release":
+        if re.fullmatch(r"[0-9a-f]{40}", args.source_release_sha or "") is None:
+            raise AssemblyError("source release SHA must be a full lowercase Git SHA")
+        if re.fullmatch(r"v[0-9A-Za-z.+-]+", args.source_release_tag or "") is None:
+            raise AssemblyError("source release tag must begin with v")
+        if args.source_release_base not in {"stage", "main"}:
+            raise AssemblyError("source release base must be stage or main")
+        if re.fullmatch(r"[1-9][0-9]*", args.source_release_pr or "") is None:
+            raise AssemblyError("source release PR must be a positive integer")
+        source_release = {
+            "sha": args.source_release_sha,
+            "tag": args.source_release_tag,
+            "base": args.source_release_base,
+            "pullRequest": int(args.source_release_pr),
+        }
     template = read_json(source / RUNTIME_TEMPLATE)
     marketplace = read_json(source / MARKETPLACE_TEMPLATE)
     plugins = marketplace.get("plugins")
@@ -474,9 +482,7 @@ def assemble(args: argparse.Namespace) -> Path:
         "pluginVersion": args.version,
         "runtimeVersion": runtime_version,
         "channel": channel,
-        "distributionKind": (
-            "official" if args.signing_state == "platform-signed" else "validation"
-        ),
+        "distributionKind": "release" if args.signing_state == "unsigned-release" else "validation",
         "developmentOverridesAllowed": False,
         "linuxRuntimeContract": linux_contract,
         "packageSigningState": args.signing_state,
@@ -507,6 +513,7 @@ def assemble(args: argparse.Namespace) -> Path:
         marketplace_installer,
         marketplace_provenance,
         args.version,
+        source_release,
     )
     return destination
 

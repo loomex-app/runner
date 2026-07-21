@@ -137,10 +137,10 @@ archive. See [packaging/README.md](packaging/README.md).
 To use a source checkout while developing, set `LOOMEX_MCP_BINARY` to an
 absolute path to a locally built adapter and set
 `LOOMEX_ALLOW_DEVELOPMENT_BINARY=1`. Keep the matching `loomex` executable next
-to that adapter, or set `LOOMEX_RUNNER_BINARY` to its absolute path. Official
+to that adapter, or set `LOOMEX_RUNNER_BINARY` to its absolute path. Release
 packages never need these variables.
-The dependency-free `/bin/sh` launcher used by official macOS/Linux packages
-ignores development overrides whenever an official runtime manifest is present.
+The dependency-free `/bin/sh` launcher used by packaged macOS/Linux releases
+ignores development overrides whenever a release runtime manifest is present.
 
 ## Development validation
 

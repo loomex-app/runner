@@ -140,8 +140,8 @@ test("launcher propagates a development binary exit code", async () => {
   assert.equal(result.status, 23, result.stderr);
 });
 
-test("official shell launcher ignores development overrides", async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), "loomex-official-launcher-"));
+test("release shell launcher ignores development overrides", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "loomex-release-launcher-"));
   await mkdir(path.join(directory, "scripts"));
   await mkdir(path.join(directory, "packaging"));
   const key = targetKey();
@@ -164,14 +164,14 @@ test("official shell launcher ignores development overrides", async () => {
   }
   await writeFile(
     path.join(directory, "packaging", "runtime-manifest.json"),
-    JSON.stringify({ distributionKind: "official", developmentOverridesAllowed: false }),
+    JSON.stringify({ distributionKind: "release", developmentOverridesAllowed: false }),
   );
   await assert.rejects(
     resolveDevelopmentBinary(directory, {
       LOOMEX_MCP_BINARY: override,
       LOOMEX_ALLOW_DEVELOPMENT_BINARY: "1",
     }),
-    /disabled in official Loomex packages/,
+    /disabled in packaged Loomex releases/,
   );
   const result = spawnSync("/bin/sh", [launcher], {
     env: {
