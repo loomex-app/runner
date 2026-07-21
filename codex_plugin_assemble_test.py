@@ -106,11 +106,16 @@ class SourcePluginContractTest(unittest.TestCase):
         initial_marketplace = state.get("marketplace")
         if (
             initial_marketplace is not None
+            and initial_marketplace.get("kind", "git") == "git"
             and state.get("metadata_present", True)
             and "last_revision" not in state
         ):
             state["last_revision"] = initial_marketplace["commit"]
-        if initial_marketplace is not None and state.get("metadata_present", True):
+        if (
+            initial_marketplace is not None
+            and initial_marketplace.get("kind", "git") == "git"
+            and state.get("metadata_present", True)
+        ):
             (checkout / ".codex-marketplace-install.json").write_text(
                 json.dumps(
                     {
@@ -133,6 +138,8 @@ class SourcePluginContractTest(unittest.TestCase):
             marketplace = state.get("marketplace")
             lines = []
             if marketplace is not None:
+                if marketplace.get("kind") == "local":
+                    return
                 lines.extend(
                     [
                         "[marketplaces.loomex]",
@@ -180,6 +187,9 @@ def save():
     marketplace = state.get("marketplace")
     lines = []
     if marketplace is not None:
+        if marketplace.get("kind") == "local":
+            config.write_text("", encoding="utf-8")
+            return
         lines.extend(["[marketplaces.loomex]", 'last_updated = "2026-07-21T00:00:00Z"'])
         if state.get("last_revision") is not None:
             lines.append("last_revision = " + json.dumps(state["last_revision"]))
@@ -203,7 +213,7 @@ if args == ["plugin", "marketplace", "list"]:
             "name": "loomex",
             "root": state["root"],
             "marketplaceSource": {
-                "sourceType": "git",
+                "sourceType": marketplace.get("kind", "git"),
                 "source": marketplace["source"],
             },
         })
@@ -223,6 +233,13 @@ elif args == ["plugin", "list", "--available"]:
     print(json.dumps({"installed": installed, "available": available}))
 elif args[:3] == ["plugin", "marketplace", "add"]:
     source = args[3]
+    if len(args) == 4:
+        state["marketplace"] = {"kind": "local", "source": source}
+        state["last_revision"] = None
+        state["plugin_installed"] = False
+        save()
+        print(json.dumps({"marketplaceName": "loomex", "installedRoot": state["root"], "alreadyAdded": False}))
+        sys.exit(0)
     if args[4:5] != ["--ref"] or len(args) != 6:
         sys.exit(31)
     commit = args[5]
@@ -268,7 +285,7 @@ elif args == ["plugin", "marketplace", "remove", "loomex"]:
 elif args == ["plugin", "add", "loomex@loomex"]:
     if marketplace is None:
         sys.exit(32)
-    if marketplace["ref"] == state.get("fail_plugin_add_ref"):
+    if marketplace.get("ref") == state.get("fail_plugin_add_ref"):
         print("injected plugin add failure", file=sys.stderr)
         sys.exit(33)
     state["plugin_installed"] = True
@@ -447,6 +464,48 @@ else:
         )
         self.assertIn("normal installation must verify provenance first", packaging)
 
+    def test_stable_installer_is_stream_safe_and_uses_pinned_trust(self) -> None:
+        installer_path = ROOT / "plugin/loomex/scripts/install-codex.sh"
+        installer = installer_path.read_text(encoding="utf-8")
+        self.assertEqual(installer.count("@LOOMEX_RELEASE_VERSION@"), 1)
+        self.assertTrue(installer.rstrip().endswith('main "$@"'))
+        self.assertIn("main() {", installer)
+        self.assertIn("releases/download/v$version", installer)
+        self.assertNotIn("api.github.com/repos", installer)
+        self.assertIn("--proto '=https'", installer)
+        self.assertIn("--tlsv1.2", installer)
+        self.assertIn("cosign_version=\"3.1.2\"", installer)
+        self.assertIn("sigstore_root_commit=\"a394944ec0ec1dd5e8ba50471e9ded37d88b5daa\"", installer)
+        self.assertIn("--trusted-root \"$trusted_root\"", installer)
+        self.assertEqual(installer.count("cosign_sha256="), 4)
+        self.assertGreaterEqual(installer.count('"$cosign_bin" verify-blob'), 2)
+        self.assertLess(
+            installer.index('"$cosign_bin" verify-blob'),
+            installer.index('"./$installer" "$version"'),
+        )
+        for unsafe in ("--insecure", "--insecure-ignore-tlog", "xattr", "spctl", "sudo"):
+            self.assertNotIn(unsafe, installer)
+
+        rendered = installer.replace("@LOOMEX_RELEASE_VERSION@", "0.1.2")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            complete = root / "install-codex.sh"
+            complete.write_text(rendered, encoding="utf-8")
+            syntax = subprocess.run(
+                ["sh", "-n", str(complete)], text=True, capture_output=True
+            )
+            self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+            # Simulate a stream that ends after the function definition but
+            # before the final invocation: no prerequisite or network command
+            # is allowed to run.
+            partial = root / "partial.sh"
+            partial.write_text(rendered.rsplit('main "$@"', 1)[0], encoding="utf-8")
+            result = subprocess.run(
+                ["sh", str(partial)], text=True, capture_output=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_release_workflow_signs_and_enforces_exact_marketplace_commit(self) -> None:
         workflow = (
             ROOT / ".github/workflows/codex-plugin-release.yml"
@@ -488,6 +547,11 @@ else:
         )
         self.assertIn("marketplace-installer", workflow)
         self.assertIn("MARKETPLACE_INSTALLER", workflow)
+        self.assertIn("stable-installer: ${{ steps.metadata.outputs.stable-installer }}", workflow)
+        self.assertIn('stable_installer="install-codex.sh"', workflow)
+        self.assertIn("STABLE_INSTALLER", workflow)
+        self.assertIn("make_latest: true", workflow)
+        self.assertGreaterEqual(workflow.count("stable-installer"), 10)
         self.assertEqual(workflow.count("live_release_sha="), 2)
         self.assertEqual(
             workflow.count(
@@ -796,6 +860,80 @@ else:
             )
             self.assertNotIn("--ref mutable-old-tag", calls)
 
+    def test_installer_upgrades_legacy_local_marketplace_to_exact_git_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "legacy-local-marketplace"
+            new_commit = "5" * 40
+            environment, state_path, log = self.write_stateful_installer_stubs(
+                root,
+                {
+                    "root": str(checkout),
+                    "marketplace": {
+                        "kind": "local",
+                        "source": str(checkout),
+                    },
+                    "plugin_installed": True,
+                },
+            )
+            self.write_installer_provenance(root, "2.0.1", new_commit)
+
+            result = subprocess.run(
+                [str(ROOT / "plugin/loomex/scripts/install-marketplace.sh"), "2.0.1"],
+                cwd=root,
+                env=environment,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["marketplace"]["ref"], new_commit)
+            self.assertTrue(state["plugin_installed"])
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("plugin marketplace remove loomex", calls)
+            self.assertIn(
+                f"plugin marketplace add loomex-app/runner --ref {new_commit}", calls
+            )
+
+    def test_installer_failure_restores_legacy_local_marketplace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "legacy-local-marketplace"
+            new_commit = "6" * 40
+            environment, state_path, log = self.write_stateful_installer_stubs(
+                root,
+                {
+                    "root": str(checkout),
+                    "marketplace": {
+                        "kind": "local",
+                        "source": str(checkout),
+                    },
+                    "plugin_installed": True,
+                    "fail_plugin_add_ref": new_commit,
+                },
+            )
+            self.write_installer_provenance(root, "2.0.2", new_commit)
+
+            result = subprocess.run(
+                [str(ROOT / "plugin/loomex/scripts/install-marketplace.sh"), "2.0.2"],
+                cwd=root,
+                env=environment,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("prior state was restored", result.stderr)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                state["marketplace"],
+                {"kind": "local", "source": str(checkout)},
+            )
+            self.assertTrue(state["plugin_installed"])
+            self.assertIn(
+                f"plugin marketplace add {checkout}",
+                log.read_text(encoding="utf-8"),
+            )
+
     def test_installer_failure_preserves_previously_uninstalled_plugin(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -994,7 +1132,7 @@ else:
                     "--marketplace-installer",
                     str(temp / "loomex-install-marketplace.sh"),
                     "--version",
-                    "0.1.1",
+                    "0.1.2",
                 ],
                 text=True,
                 capture_output=True,
@@ -1016,7 +1154,7 @@ else:
             shutil.copytree(ROOT / "plugin/loomex", source)
             plugin_json = source / ".codex-plugin/plugin.json"
             plugin = json.loads(plugin_json.read_text())
-            plugin["version"] = "0.1.1+codex.local-20260721-120000"
+            plugin["version"] = "0.1.2+codex.local-20260721-120000"
             plugin_json.write_text(json.dumps(plugin))
             artifacts = temp / "artifacts"
             self.write_artifacts(artifacts)
@@ -1034,7 +1172,7 @@ else:
             self.assertEqual(result.returncode, 0, result.stderr)
             manifest = json.loads((temp / "dist/loomex/packaging/runtime-manifest.json").read_text())
             self.assertEqual(manifest["pluginVersion"], plugin["version"])
-            self.assertEqual(manifest["runtimeVersion"], "0.1.1")
+            self.assertEqual(manifest["runtimeVersion"], "0.1.2")
             self.assertEqual(validate_runtime_integrity(temp / "dist/loomex"), [])
 
 
