@@ -32,8 +32,9 @@ does not ask the user to obtain a second installer.
 
 ## Marketplace integrity and publication
 
-Assembly creates `loomex-codex-marketplace-<version>.zip`, its installer, and a
-companion provenance document. The provenance binds all of the following:
+Assembly creates `loomex-codex-marketplace-<version>.zip`, its versioned
+installer, the stable `install-codex.sh` bootstrap, and a companion provenance
+document. The provenance binds all of the following:
 
 - the plugin version, archive name, and archive SHA-256;
 - the canonical content-addressed Git tree and orphan commit;
@@ -42,7 +43,8 @@ companion provenance document. The provenance binds all of the following:
 - the SHA-256 plus keyless Sigstore release-integrity contract.
 
 Production keyless-signs the plugin archive, marketplace archive, provenance,
-and installer with Cosign using GitHub's short-lived OIDC token. Verification
+versioned installer, and stable bootstrap with Cosign using GitHub's short-lived
+OIDC token. Verification
 pins `https://token.actions.githubusercontent.com` and the exact workflow
 identity. No Loomex private signing key or Apple credential is stored.
 
@@ -52,6 +54,15 @@ version branch is only a discoverability pointer: normal installation must verif
 and pass the exact 40-character
 `marketplace.commit` to Codex `--ref`. The online and offline installers both
 fail closed before mutation if provenance or Sigstore verification fails.
+
+The user-facing URL is
+`https://github.com/loomex-app/runner/releases/latest/download/install-codex.sh`.
+The bootstrap embeds the selected release version, downloads subsequent assets
+only from that version tag, and uses a checksum-pinned Cosign binary plus a
+checksum-pinned official Sigstore trusted root. This avoids dependency on the
+Sigstore TUF CDN during installation. The convenience `curl | sh` path still
+trusts GitHub TLS for the bootstrap itself; its separately published Sigstore
+bundle supports a two-step high-assurance verification path.
 
 Release assets disable overwrite. Immediately before each external write, CI
 resolves the live remote version tag and requires it to peel to the gated

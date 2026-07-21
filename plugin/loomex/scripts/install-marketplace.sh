@@ -38,11 +38,22 @@ chmod 400 "$temporary/provenance.json" "$temporary/provenance.sigstore.json"
 exec 3< "$temporary/provenance.json"
 exec 4< "$temporary/provenance.json"
 test /dev/fd/3 -ef /dev/fd/4
-cosign verify-blob \
-  --bundle "$temporary/provenance.sigstore.json" \
-  --certificate-identity "https://github.com/loomex-app/runner/.github/workflows/codex-plugin-release.yml@refs/tags/v$version" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  /dev/fd/3
+trusted_root=${LOOMEX_COSIGN_TRUSTED_ROOT:-}
+if [ -n "$trusted_root" ]; then
+  test -f "$trusted_root" && test ! -L "$trusted_root"
+  cosign verify-blob \
+    --bundle "$temporary/provenance.sigstore.json" \
+    --trusted-root "$trusted_root" \
+    --certificate-identity "https://github.com/loomex-app/runner/.github/workflows/codex-plugin-release.yml@refs/tags/v$version" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    /dev/fd/3
+else
+  cosign verify-blob \
+    --bundle "$temporary/provenance.sigstore.json" \
+    --certificate-identity "https://github.com/loomex-app/runner/.github/workflows/codex-plugin-release.yml@refs/tags/v$version" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    /dev/fd/3
+fi
 
 python3 - "$version" 4<&4 <<'PY'
 import json
@@ -274,13 +285,31 @@ def marketplace_entry(*, read_metadata=True):
     entry = matches[0]
     source = entry.get("marketplaceSource")
     root = entry.get("root")
-    if not isinstance(source, dict) or source.get("sourceType") != "git":
-        fail("existing loomex marketplace is not a Git marketplace")
-    url = source.get("source")
-    if not trusted_repository_source(url):
-        fail("existing loomex marketplace points at an unexpected repository")
     if not isinstance(root, str) or not Path(root).is_absolute():
         fail("existing loomex marketplace has an invalid checkout root")
+    try:
+        root_mode = os.lstat(root).st_mode
+    except FileNotFoundError:
+        fail("existing loomex marketplace root is missing")
+    if not stat.S_ISDIR(root_mode):
+        fail("existing loomex marketplace root is not a real directory")
+    if not isinstance(source, dict):
+        fail("existing loomex marketplace has no source metadata")
+    source_type = source.get("sourceType")
+    url = source.get("source")
+    if source_type == "local":
+        if not isinstance(url, str) or not Path(url).is_absolute() or url != root:
+            fail("existing local loomex marketplace source is invalid")
+        return {
+            "kind": "local",
+            "source": url,
+            "commit": None,
+            "configured_commit": None,
+        }
+    if source_type != "git":
+        fail("existing loomex marketplace uses an unsupported source type")
+    if not trusted_repository_source(url):
+        fail("existing loomex marketplace points at an unexpected repository")
     if (
         git_config_bool(root, "core.sparseCheckout")
         or git_config_bool(root, "core.sparseCheckoutCone")
@@ -294,6 +323,7 @@ def marketplace_entry(*, read_metadata=True):
     if origin != url or not trusted_repository_source(origin):
         fail("loomex marketplace list and Git origin disagree about the source")
     return {
+        "kind": "git",
         "source": url,
         "commit": commit,
         "configured_commit": (
@@ -360,6 +390,12 @@ def add_marketplace(source, commit):
     codex_json("plugin", "marketplace", "upgrade", MARKETPLACE)
 
 
+def add_local_marketplace(source):
+    if not isinstance(source, str) or not Path(source).is_absolute():
+        fail("cannot restore an invalid local marketplace source")
+    codex_json("plugin", "marketplace", "add", source)
+
+
 def verify_state(expected_marketplace, installed):
     current_marketplace = marketplace_entry()
     current_plugin = plugin_state()
@@ -369,15 +405,23 @@ def verify_state(expected_marketplace, installed):
     else:
         if current_marketplace is None:
             fail("marketplace is missing after transaction")
-        if current_marketplace["commit"] != expected_marketplace["commit"]:
-            fail("marketplace checkout does not match the expected exact commit")
-        if current_marketplace["configured_commit"] != expected_marketplace["commit"]:
-            fail("marketplace activation metadata does not prove the expected exact ref")
-        # Codex normalizes owner/repo to an HTTPS .git URL. Both forms are the
-        # same pinned repository; untrusted repository forms were rejected
-        # while reading each state.
-        if not trusted_repository_source(expected_marketplace["source"]):
-            fail("expected marketplace source is not the trusted repository")
+        if expected_marketplace["kind"] == "local":
+            if current_marketplace["kind"] != "local":
+                fail("local marketplace was not restored after rollback")
+            if current_marketplace["source"] != expected_marketplace["source"]:
+                fail("restored local marketplace points at a different path")
+        else:
+            if current_marketplace["kind"] != "git":
+                fail("marketplace is not the expected Git marketplace")
+            if current_marketplace["commit"] != expected_marketplace["commit"]:
+                fail("marketplace checkout does not match the expected exact commit")
+            if current_marketplace["configured_commit"] != expected_marketplace["commit"]:
+                fail("marketplace activation metadata does not prove the expected exact ref")
+            # Codex normalizes owner/repo to an HTTPS .git URL. Both forms are the
+            # same pinned repository; untrusted repository forms were rejected
+            # while reading each state.
+            if not trusted_repository_source(expected_marketplace["source"]):
+                fail("expected marketplace source is not the trusted repository")
     if current_plugin["installed"] != installed:
         fail("loomex plugin installation state does not match the expected state")
     if installed and not current_plugin["enabled"]:
@@ -389,9 +433,12 @@ def restore(previous):
     old_marketplace = previous["marketplace"]
     old_installed = previous["plugin"]["installed"]
     if old_marketplace is not None:
-        # A prior branch or tag is intentionally not restored symbolically. The
-        # checked-out commit captured before mutation is the only rollback ref.
-        add_marketplace(old_marketplace["source"], old_marketplace["commit"])
+        if old_marketplace["kind"] == "local":
+            add_local_marketplace(old_marketplace["source"])
+        else:
+            # A prior branch or tag is intentionally not restored symbolically. The
+            # checked-out commit captured before mutation is the only rollback ref.
+            add_marketplace(old_marketplace["source"], old_marketplace["commit"])
         if old_installed:
             codex_json("plugin", "add", PLUGIN_ID)
     verify_state(old_marketplace, old_installed)
@@ -419,6 +466,7 @@ old_plugin = previous["plugin"]
 # configured through a mutable branch/tag is deliberately rewritten below.
 if (
     old_marketplace is not None
+    and old_marketplace["kind"] == "git"
     and old_marketplace["commit"] == marketplace_commit
     and old_marketplace["configured_commit"] == marketplace_commit
     and old_plugin["installed"]
@@ -426,7 +474,11 @@ if (
 ):
     sys.exit(0)
 
-install_source = old_marketplace["source"] if old_marketplace is not None else REPOSITORY
+install_source = (
+    old_marketplace["source"]
+    if old_marketplace is not None and old_marketplace["kind"] == "git"
+    else REPOSITORY
+)
 try:
     if old_marketplace is not None:
         if old_plugin["installed"]:
@@ -435,7 +487,7 @@ try:
     add_marketplace(install_source, marketplace_commit)
     codex_json("plugin", "add", PLUGIN_ID)
     verify_state(
-        {"source": install_source, "commit": marketplace_commit},
+        {"kind": "git", "source": install_source, "commit": marketplace_commit},
         True,
     )
 except Exception as original_error:
