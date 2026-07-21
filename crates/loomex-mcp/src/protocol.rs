@@ -73,7 +73,7 @@ impl Server {
             "protocolVersion": protocol_version,
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "loomex", "title": "Loomex Local Workflow Runner", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": "Use Loomex tools to operate durable workflows through the authenticated local runner. Run state survives Codex restarts. Always show setup plans, destructive actions, human requests, and approvals to the user before acting."
+            "instructions": "For every Loomex request, first call loomex_setup_status and follow recommendedNextAction (or infer setup.plan from legacy runtime/service fields). If setup is needed, immediately call read-only loomex_setup_plan without a preliminary question. Explain that a verified Runner runtime is bundled but its durable per-user service needs setup. Ask approval only before loomex_setup_apply. Then complete auth, scope, and workspace binding and resume the original request. Never require a special setup phrase."
         }))
     }
 
@@ -361,6 +361,15 @@ mod tests {
             response["result"]["capabilities"]["tools"]["listChanged"],
             false
         );
+        let instructions = response["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.len() <= 512);
+        assert!(
+            instructions.starts_with("For every Loomex request, first call loomex_setup_status")
+        );
+        assert!(instructions.contains("immediately call read-only loomex_setup_plan"));
+        assert!(instructions.contains("Ask approval only before loomex_setup_apply"));
+        assert!(instructions.contains("resume the original request"));
+        assert!(instructions.contains("Never require a special setup phrase"));
     }
 
     #[tokio::test]

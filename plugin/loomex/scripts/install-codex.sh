@@ -132,7 +132,7 @@ identity="https://github.com/$repository/.github/workflows/$workflow@refs/tags/v
     "./$installer" "$version"
 )
 
-echo "Loomex Codex plugin $version is installed and enabled. Restart Codex or open a new task."
+echo "Loomex Codex plugin $version is installed and enabled. Restart Codex or open a new task, then ask for any Loomex workflow naturally; Codex will automatically guide any required Runner setup, authentication, and workspace binding."
 }
 
 # Keep this invocation as the final bytes of the file. When used through

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.4 - 2026-07-21
+
+- Start first-use onboarding from any natural Loomex request without requiring
+  a special setup phrase.
+- Make Codex inspect setup, prepare the read-only plan automatically, request
+  approval only before applying persistent Runner setup, and then resume the
+  original request after authentication, scope selection, and binding.
+- Distinguish the bundled verified runtime from durable per-user service state
+  in the additive setup-status contract.
+
 ## 0.1.3 - 2026-07-21
 
 - Install Cosign 3.1.2 in the release workflow from its official binary with a

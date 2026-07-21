@@ -2640,13 +2640,144 @@ fn plugin_setup_status(options: &GlobalOptions) -> Result<Value, String> {
     let installer = RuntimeInstaller::for_current_user().map_err(format_core_error)?;
     let active = installer.active_runtime().map_err(format_core_error)?;
     let service = parse_json_output(run_runner_service_status(&[], options)?)?;
-    Ok(json!({
+    let supported = cfg!(unix);
+    let bundled = plugin_package_runtime();
+    let service_registered = service
+        .get("installed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let service_active = service
+        .get("active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let runtime_matches_bundle = bundled
+        .as_ref()
+        .ok()
+        .zip(active.as_ref())
+        .is_some_and(|(package, runtime)| plugin_runtime_matches_bundle(package, runtime));
+    let service_readiness = if supported
+        && bundled.is_ok()
+        && runtime_matches_bundle
+        && service_registered
+        && !service_active
+    {
+        Some(
+            plugin_service_bootstrap_readiness(options).unwrap_or_else(|error| {
+                json!({
+                    "ready": false,
+                    "available": false,
+                    "error": plugin_structured_error(&error),
+                    "reason": "bootstrap readiness could not be determined",
+                })
+            }),
+        )
+    } else {
+        None
+    };
+    let readiness_ready = service_readiness
+        .as_ref()
+        .and_then(|readiness| readiness.get("ready"))
+        .and_then(Value::as_bool);
+    let (setup_required, recommended_next_action, recommendation_reason) =
+        plugin_setup_recommendation(
+            supported,
+            bundled.is_ok(),
+            runtime_matches_bundle,
+            service_registered,
+            service_active,
+            readiness_ready,
+        );
+    let bundled_runtime = match bundled.as_ref() {
+        Ok(package) => {
+            json!({
+                "available": true,
+                "version": package.runtime_version,
+                "pluginVersion": package.plugin_version,
+                "channel": package.channel,
+                "target": package.target,
+            })
+        }
+        Err(error) => json!({
+            "available": false,
+            "error": plugin_structured_error(error),
+        }),
+    };
+    let durable_runtime = json!({
         "installed": active.is_some(),
         "runtime": active,
         "runtimeRoot": installer.layout().root,
+        "runtimeMatchesBundle": runtime_matches_bundle,
+        "serviceRegistered": service_registered,
+        "serviceActive": service_active,
+        "serviceReadiness": service_readiness,
+    });
+    Ok(json!({
+        "installed": durable_runtime["installed"],
+        "runtime": durable_runtime["runtime"],
+        "runtimeRoot": durable_runtime["runtimeRoot"],
         "service": service,
-        "supported": cfg!(unix),
+        "supported": supported,
+        "bundledRuntime": bundled_runtime,
+        "durableRuntime": durable_runtime,
+        "setupRequired": setup_required,
+        "recommendedNextAction": recommended_next_action,
+        "recommendationReason": recommendation_reason,
     }))
+}
+
+fn plugin_setup_recommendation(
+    supported: bool,
+    bundled_available: bool,
+    runtime_matches_bundle: bool,
+    service_registered: bool,
+    service_active: bool,
+    readiness_ready: Option<bool>,
+) -> (bool, &'static str, &'static str) {
+    if !supported {
+        (false, "unsupported", "platform_unsupported")
+    } else if !bundled_available {
+        (false, "package.error", "bundled_package_error")
+    } else if !runtime_matches_bundle {
+        (true, "setup.plan", "runtime_mismatch")
+    } else if !service_registered {
+        (true, "setup.plan", "service_not_registered")
+    } else if service_active {
+        (false, "auth.status", "setup_complete")
+    } else if readiness_ready == Some(true) {
+        (true, "setup.plan", "service_ready_but_inactive")
+    } else {
+        // A registered service may intentionally remain inactive until auth
+        // and workspace binding complete. Do not turn that into a repair loop.
+        (false, "auth.status", "continue_authentication_and_binding")
+    }
+}
+
+fn plugin_runtime_matches_bundle(
+    package: &PluginPackageRuntime,
+    runtime: &loomex_core::runtime_install::InstalledRuntime,
+) -> bool {
+    let installed_target = match (runtime.artifact_os.as_str(), runtime.artifact_arch.as_str()) {
+        ("macos", "aarch64") => Some("darwin-arm64"),
+        ("macos", "x86_64") => Some("darwin-x64"),
+        ("linux", "aarch64") => Some("linux-arm64"),
+        ("linux", "x86_64") => Some("linux-x64"),
+        _ => None,
+    };
+    package.runtime_version == runtime.version
+        && package.sha256 == runtime.artifact_sha256
+        && installed_target == Some(package.target.as_str())
+}
+
+fn plugin_structured_error(error: &str) -> Value {
+    let (code, message) = error
+        .split_once(':')
+        .map_or(("PLUGIN_PACKAGE_UNAVAILABLE", error), |(code, message)| {
+            (code.trim(), message.trim())
+        });
+    json!({
+        "code": code,
+        "message": if message.is_empty() { error } else { message },
+    })
 }
 
 fn plugin_setup_plan(params: &Value, options: &GlobalOptions) -> Result<Value, String> {
@@ -9741,7 +9872,9 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&runtime_root);
         let previous = env::var_os(loomex_core::RUNTIME_HOME_ENV);
+        let previous_plugin_root = env::var_os(PLUGIN_ROOT_ENV);
         env::set_var(loomex_core::RUNTIME_HOME_ENV, &runtime_root);
+        env::remove_var(PLUGIN_ROOT_ENV);
 
         let output = run_runner_plugin_control(
             &[
@@ -9761,12 +9894,98 @@ mod tests {
             Some(value) => env::set_var(loomex_core::RUNTIME_HOME_ENV, value),
             None => env::remove_var(loomex_core::RUNTIME_HOME_ENV),
         }
+        match previous_plugin_root {
+            Some(value) => env::set_var(PLUGIN_ROOT_ENV, value),
+            None => env::remove_var(PLUGIN_ROOT_ENV),
+        }
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(PLUGIN_CONTROL_SCHEMA_VERSION, parsed["schemaVersion"]);
         assert_eq!("setup.status", parsed["method"]);
         assert_eq!(false, parsed["result"]["installed"]);
         assert!(parsed["result"]["service"].is_object());
+        assert_eq!(
+            parsed["result"]["installed"],
+            parsed["result"]["durableRuntime"]["installed"]
+        );
+        assert_eq!(
+            parsed["result"]["runtime"],
+            parsed["result"]["durableRuntime"]["runtime"]
+        );
+        assert_eq!(
+            parsed["result"]["runtimeRoot"],
+            parsed["result"]["durableRuntime"]["runtimeRoot"]
+        );
+        assert_eq!("package.error", parsed["result"]["recommendedNextAction"]);
+        assert_eq!(
+            "PLUGIN_ROOT_REQUIRED",
+            parsed["result"]["bundledRuntime"]["error"]["code"]
+        );
         let _ = fs::remove_dir_all(runtime_root);
+    }
+
+    #[test]
+    fn setup_recommendation_distinguishes_deferred_from_stopped_service() {
+        assert_eq!(
+            (false, "auth.status", "continue_authentication_and_binding"),
+            plugin_setup_recommendation(true, true, true, true, false, Some(false))
+        );
+        assert_eq!(
+            (true, "setup.plan", "service_ready_but_inactive"),
+            plugin_setup_recommendation(true, true, true, true, false, Some(true))
+        );
+        assert_eq!(
+            (false, "auth.status", "setup_complete"),
+            plugin_setup_recommendation(true, true, true, true, true, None)
+        );
+        assert_eq!(
+            (true, "setup.plan", "runtime_mismatch"),
+            plugin_setup_recommendation(true, true, false, true, false, None)
+        );
+        assert_eq!(
+            (true, "setup.plan", "service_not_registered"),
+            plugin_setup_recommendation(true, true, true, false, false, None)
+        );
+        assert_eq!(
+            (false, "package.error", "bundled_package_error"),
+            plugin_setup_recommendation(true, false, false, false, false, None)
+        );
+        assert_eq!(
+            (false, "unsupported", "platform_unsupported"),
+            plugin_setup_recommendation(false, true, false, false, false, None)
+        );
+    }
+
+    #[test]
+    fn runtime_bundle_match_requires_version_digest_and_target() {
+        let package = PluginPackageRuntime {
+            plugin_version: "1.2.3".to_string(),
+            runtime_version: "1.2.3".to_string(),
+            channel: "stable".to_string(),
+            signing_state: "unsigned-release".to_string(),
+            target: "darwin-arm64".to_string(),
+            sha256: "abc123".to_string(),
+            source_executable: PathBuf::from("/bundle/loomex"),
+            stable_executable: PathBuf::from("/runtime/loomex"),
+        };
+        let runtime = loomex_core::InstalledRuntime {
+            schema_version: "loomex.runtime/v1".to_string(),
+            version: "1.2.3".to_string(),
+            artifact_name: "loomex-plugin-runtime".to_string(),
+            artifact_sha256: "abc123".to_string(),
+            artifact_os: "macos".to_string(),
+            artifact_arch: "aarch64".to_string(),
+            executable_name: "loomex".to_string(),
+            installed_at_epoch_ms: 1,
+        };
+        assert!(plugin_runtime_matches_bundle(&package, &runtime));
+
+        let mut wrong_digest = runtime.clone();
+        wrong_digest.artifact_sha256 = "different".to_string();
+        assert!(!plugin_runtime_matches_bundle(&package, &wrong_digest));
+
+        let mut wrong_target = runtime;
+        wrong_target.artifact_arch = "x86_64".to_string();
+        assert!(!plugin_runtime_matches_bundle(&package, &wrong_target));
     }
 
     #[cfg(unix)]
