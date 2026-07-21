@@ -2,6 +2,7 @@
 members = [
   "crates/loomex-core",
   "crates/loomex-cli",
+  "crates/loomex-mcp",
   "crates/loomex-tauri",
 ]
 resolver = "2"
@@ -9,5 +10,4 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "UNLICENSED"
-repository = "https://github.com/loomex/loomex"
-
+repository = "https://github.com/loomex-app/runner"

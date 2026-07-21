@@ -12,9 +12,9 @@ Run from the runner workspace:
 scripts/mac_packaging_smoke.sh
 ```
 
-The script builds `loomex-tauri`, assembles `Loomex.app`, signs it, creates a
-DMG when `hdiutil` is available, and writes SHA-256 checksums plus a structured
-manifest:
+The script builds `loomex-tauri` and the `loomex` runner CLI, places both
+binaries in `Loomex.app/Contents/MacOS`, signs the app, creates a DMG when
+`hdiutil` is available, and writes SHA-256 checksums plus a structured manifest:
 
 ```text
 target/loomex-tauri-package/release/Loomex.app
@@ -56,8 +56,8 @@ Use a clean macOS user when possible.
 6. Complete login and confirm credentials are stored in the system keychain when
    available, or local fallback is reported with a warning.
 7. Select a workspace using the native Tauri directory picker.
-8. Bind the workspace to a project.
-9. Start and stop the runner.
+8. Bind the workspace to a project and confirm the bundled runner starts.
+9. Run a workflow and confirm no separate CLI install is required.
 10. Quit and relaunch the app; config, binding, and non-secret state must
     survive restart.
 
@@ -100,6 +100,8 @@ and key-rotation rules.
 
 - The Tauri bundle identifier is `app.loomex.runner`.
 - The bundle targets are `app` and `dmg`.
+- The app bundle includes `Contents/MacOS/loomex`; Tauri starts it as
+  `loomex runner service run` after bind and before workflow execution.
 - The app uses the shared Rust core and the same CLI config/auth paths.
 - Secure storage is provided by `SystemCredentialStore`: macOS keychain when
   available, with explicit local-file fallback reporting.

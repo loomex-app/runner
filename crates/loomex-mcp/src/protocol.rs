@@ -1,0 +1,425 @@
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use serde_json::{json, Value};
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::sync::{mpsc, Semaphore};
+
+use crate::{
+    ipc::{ClientError, ControlClient},
+    tools::{self, DeadlineKind},
+};
+
+pub const MCP_ENVELOPE_VERSION: &str = "loomex.mcp/v1";
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+static NEXT_ENVELOPE_ID: AtomicU64 = AtomicU64::new(1);
+
+pub struct Server {
+    client: ControlClient,
+}
+
+impl Server {
+    pub fn new(client: impl Into<ControlClient>) -> Self {
+        Self {
+            client: client.into(),
+        }
+    }
+
+    pub async fn handle(&self, request: Value) -> Option<Value> {
+        let Some(object) = request.as_object() else {
+            return Some(error_response(Value::Null, -32600, "Invalid Request", None));
+        };
+        let id = object.get("id").cloned();
+        let is_notification = id.is_none();
+        let response_id = id.unwrap_or(Value::Null);
+        if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return (!is_notification)
+                .then(|| error_response(response_id, -32600, "Invalid Request", None));
+        }
+        let Some(method) = object.get("method").and_then(Value::as_str) else {
+            return (!is_notification)
+                .then(|| error_response(response_id, -32600, "Invalid Request", None));
+        };
+        let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
+        if is_notification {
+            // MCP lifecycle, cancellation, and log-level notifications require no acknowledgement.
+            return None;
+        }
+        let result = match method {
+            "initialize" => self.initialize(&params),
+            "ping" => Ok(json!({})),
+            "tools/list" => self.list_tools(&params),
+            "tools/call" => self.call_tool(&params).await,
+            _ => Err(RpcError::new(-32601, "Method not found")),
+        };
+        Some(match result {
+            Ok(result) => success_response(response_id, result),
+            Err(error) => error_response(response_id, error.code, &error.message, error.data),
+        })
+    }
+
+    fn initialize(&self, params: &Value) -> Result<Value, RpcError> {
+        require_object(params)?;
+        let requested = params.get("protocolVersion").and_then(Value::as_str);
+        let protocol_version = match requested {
+            Some("2024-11-05" | "2025-03-26" | "2025-06-18") => requested.unwrap(),
+            _ => MCP_PROTOCOL_VERSION,
+        };
+        Ok(json!({
+            "protocolVersion": protocol_version,
+            "capabilities": {"tools": {"listChanged": false}},
+            "serverInfo": {"name": "loomex", "title": "Loomex Local Workflow Runner", "version": env!("CARGO_PKG_VERSION")},
+            "instructions": "Use Loomex tools to operate durable workflows through the authenticated local runner. Run state survives Codex restarts. Always show setup plans, destructive actions, human requests, and approvals to the user before acting."
+        }))
+    }
+
+    fn list_tools(&self, params: &Value) -> Result<Value, RpcError> {
+        let params = require_object(params)?;
+        if let Some(cursor) = params.get("cursor") {
+            if !cursor.is_null() {
+                return Err(RpcError::invalid_params(
+                    "tools/list does not use pagination",
+                ));
+            }
+        }
+        if params.keys().any(|key| key != "cursor") {
+            return Err(RpcError::invalid_params("unexpected tools/list parameter"));
+        }
+        Ok(json!({"tools": tools::definitions()}))
+    }
+
+    async fn call_tool(&self, params: &Value) -> Result<Value, RpcError> {
+        let params = require_object(params)?;
+        if params.keys().any(|key| key != "name" && key != "arguments") {
+            return Err(RpcError::invalid_params("unexpected tools/call parameter"));
+        }
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::invalid_params("tools/call.name is required"))?;
+        let definition = tools::definition(name)
+            .ok_or_else(|| RpcError::invalid_params(format!("unknown Loomex tool: {name}")))?;
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        tools::validate_arguments(&definition.input_schema, &arguments)
+            .map_err(RpcError::invalid_params)?;
+        let route = tools::route(name).expect("every definition has a route");
+        let deadline = match route.deadline {
+            DeadlineKind::Default => Duration::from_secs(12),
+            DeadlineKind::Setup => Duration::from_secs(47),
+            DeadlineKind::Wait => Duration::from_secs(
+                arguments
+                    .get("timeoutSeconds")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(30)
+                    .min(45)
+                    + 2,
+            ),
+        };
+        let request_id = next_envelope_id();
+        let daemon_arguments = normalize_daemon_arguments(name, arguments);
+        let envelope = match self
+            .client
+            .call(route.method, &daemon_arguments, deadline)
+            .await
+        {
+            Ok(data) => {
+                let success = success_envelope(name, request_id.clone(), data);
+                match tools::validate_output(&definition.output_schema, &success) {
+                    Ok(()) => success,
+                    Err(error) => failure_envelope(
+                        name,
+                        request_id,
+                        &ClientError::Protocol(format!(
+                            "local control returned data outside the {name} output contract: {error}"
+                        )),
+                    ),
+                }
+            }
+            Err(error) => failure_envelope(name, request_id, &error),
+        };
+        debug_assert!(tools::validate_output(&definition.output_schema, &envelope).is_ok());
+        let is_error = envelope.get("ok") == Some(&Value::Bool(false));
+        let text = serde_json::to_string(&envelope).map_err(|error| {
+            RpcError::new(-32603, format!("could not encode tool result: {error}"))
+        })?;
+        Ok(json!({
+            "content": [{"type":"text", "text":text}],
+            "structuredContent": envelope,
+            "isError": is_error
+        }))
+    }
+}
+
+fn normalize_daemon_arguments(tool: &str, mut arguments: Value) -> Value {
+    let Some(object) = arguments.as_object_mut() else {
+        return arguments;
+    };
+    match tool {
+        "loomex_binding_create" => {
+            if let Some(path) = object.remove("workspacePath") {
+                object.insert("localRootPath".to_string(), path);
+            }
+        }
+        "loomex_human_respond" => {
+            if let Some(response) = object.remove("response") {
+                object.insert("payload".to_string(), response);
+            }
+        }
+        "loomex_approval_decide" => {
+            if let Some(approval_id) = object.remove("approvalId") {
+                object.insert("requestId".to_string(), approval_id);
+            }
+        }
+        _ => {}
+    }
+    arguments
+}
+
+pub async fn serve(server: Server) -> Result<(), String> {
+    let mut input = BufReader::new(io::stdin());
+    let server = Arc::new(server);
+    let concurrency = Arc::new(Semaphore::new(32));
+    let (responses, mut response_receiver) = mpsc::channel::<Value>(64);
+    let writer = tokio::spawn(async move {
+        let mut output = BufWriter::new(io::stdout());
+        while let Some(response) = response_receiver.recv().await {
+            let encoded = serde_json::to_vec(&response)
+                .map_err(|error| format!("failed to encode MCP response: {error}"))?;
+            output
+                .write_all(&encoded)
+                .await
+                .map_err(|error| format!("failed to write MCP stdout: {error}"))?;
+            output
+                .write_all(b"\n")
+                .await
+                .map_err(|error| format!("failed to frame MCP response: {error}"))?;
+            output
+                .flush()
+                .await
+                .map_err(|error| format!("failed to flush MCP stdout: {error}"))?;
+        }
+        Ok::<_, String>(())
+    });
+    let mut requests = tokio::task::JoinSet::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = input
+            .read_line(&mut line)
+            .await
+            .map_err(|error| format!("failed to read MCP stdin: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        let parsed = if read > MAX_REQUEST_BYTES {
+            Some(error_response(
+                Value::Null,
+                -32600,
+                "MCP request exceeds 1 MiB",
+                None,
+            ))
+        } else {
+            match serde_json::from_str::<Value>(&line) {
+                Ok(request) => {
+                    let server = Arc::clone(&server);
+                    let responses = responses.clone();
+                    let permit = Arc::clone(&concurrency)
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| "MCP concurrency limiter closed".to_string())?;
+                    requests.spawn(async move {
+                        let _permit = permit;
+                        if let Some(response) = server.handle(request).await {
+                            let _ = responses.send(response).await;
+                        }
+                    });
+                    None
+                }
+                Err(error) => Some(error_response(
+                    Value::Null,
+                    -32700,
+                    "Parse error",
+                    Some(json!({"detail": error.to_string()})),
+                )),
+            }
+        };
+        if let Some(response) = parsed {
+            responses
+                .send(response)
+                .await
+                .map_err(|_| "MCP stdout writer stopped".to_string())?;
+        }
+    }
+    while requests.join_next().await.is_some() {}
+    drop(responses);
+    writer
+        .await
+        .map_err(|error| format!("MCP stdout writer task failed: {error}"))?
+}
+
+#[derive(Debug)]
+struct RpcError {
+    code: i64,
+    message: String,
+    data: Option<Value>,
+}
+
+impl RpcError {
+    fn new(code: i64, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    fn invalid_params(message: impl Into<String>) -> Self {
+        Self::new(-32602, message)
+    }
+}
+
+fn require_object(value: &Value) -> Result<&serde_json::Map<String, Value>, RpcError> {
+    value
+        .as_object()
+        .ok_or_else(|| RpcError::invalid_params("params must be an object"))
+}
+
+fn success_response(id: Value, result: Value) -> Value {
+    json!({"jsonrpc":"2.0", "id":id, "result":result})
+}
+
+fn error_response(id: Value, code: i64, message: &str, data: Option<Value>) -> Value {
+    let mut error = json!({"code":code, "message":message});
+    if let Some(data) = data {
+        error["data"] = data;
+    }
+    json!({"jsonrpc":"2.0", "id":id, "error":error})
+}
+
+fn success_envelope(tool: &str, request_id: String, data: Value) -> Value {
+    json!({
+        "schemaVersion": MCP_ENVELOPE_VERSION,
+        "ok": true,
+        "tool": tool,
+        "data": data,
+        "meta": {"requestId":request_id, "timestampMs":timestamp_ms()}
+    })
+}
+
+fn failure_envelope(tool: &str, request_id: String, error: &ClientError) -> Value {
+    json!({
+        "schemaVersion": MCP_ENVELOPE_VERSION,
+        "ok": false,
+        "tool": tool,
+        "error": {"code":error.code(), "message":error.to_string(), "retryable":error.retryable()},
+        "meta": {"requestId":request_id, "timestampMs":timestamp_ms()}
+    })
+}
+
+fn timestamp_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn next_envelope_id() -> String {
+    format!(
+        "tool-{}-{}",
+        timestamp_ms(),
+        NEXT_ENVELOPE_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn server() -> Server {
+        Server::new(crate::ipc::LocalControlClient::new(
+            PathBuf::from("/unavailable"),
+            PathBuf::from("/unavailable"),
+        ))
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_tools() {
+        let response = server().handle(json!({
+            "jsonrpc":"2.0", "id":1, "method":"initialize",
+            "params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}
+        })).await.unwrap();
+        assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(
+            response["result"]["capabilities"]["tools"]["listChanged"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn notifications_have_no_response() {
+        let response = server()
+            .handle(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await;
+        assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_arguments_are_json_rpc_errors() {
+        let response = server().handle(json!({
+            "jsonrpc":"2.0", "id":"a", "method":"tools/call",
+            "params":{"name":"loomex_run_wait","arguments":{"executionId":"r","timeoutSeconds":46}}
+        })).await.unwrap();
+        assert_eq!(response["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn daemon_argument_aliases_match_the_local_control_contract() {
+        assert_eq!(
+            normalize_daemon_arguments(
+                "loomex_binding_create",
+                json!({"projectId":"p","workspacePath":"/repo"})
+            ),
+            json!({"projectId":"p","localRootPath":"/repo"})
+        );
+        assert_eq!(
+            normalize_daemon_arguments(
+                "loomex_human_respond",
+                json!({"requestId":"h","response":{"answer":"yes"}})
+            ),
+            json!({"requestId":"h","payload":{"answer":"yes"}})
+        );
+        for response in [
+            json!({"answer": {"value": 1}}),
+            json!({"response": ["yes", "no"]}),
+            json!({"payload": {"nested": true}}),
+            json!({"decision": "custom"}),
+        ] {
+            assert_eq!(
+                normalize_daemon_arguments(
+                    "loomex_human_respond",
+                    json!({"requestId":"h","response":response.clone()})
+                ),
+                json!({"requestId":"h","payload":response})
+            );
+        }
+        assert_eq!(
+            normalize_daemon_arguments(
+                "loomex_approval_decide",
+                json!({"approvalId":"a","decision":"approve"})
+            ),
+            json!({"requestId":"a","decision":"approve"})
+        );
+        assert_eq!(
+            normalize_daemon_arguments("loomex_setup_apply", json!({"planId":"p","confirm":true})),
+            json!({"planId":"p","confirm":true})
+        );
+    }
+}

@@ -1,3 +1,5 @@
+#![allow(clippy::large_enum_variant)]
+
 pub mod approval;
 pub mod auth;
 pub mod binding;
@@ -9,6 +11,7 @@ pub mod execution;
 pub mod grpc;
 pub mod lifecycle;
 pub mod local_capabilities;
+pub mod local_control;
 pub mod logs;
 pub mod management;
 pub mod operational_readiness;
@@ -18,6 +21,7 @@ pub mod redaction;
 pub mod release_distribution;
 pub mod release_security;
 pub mod runtime_guard;
+pub mod runtime_install;
 pub mod security;
 pub mod service;
 pub mod stream;
@@ -59,14 +63,27 @@ pub use local_capabilities::{
     HttpRequestOutput, LocalCapabilityExecutor, RedactionMetadata, ShellCancellationToken,
     ShellExecInput, ShellExecOutput, ShellExecOutputArtifacts, TestRunInput, TestRunOutput,
 };
-pub use logs::{read_recent_log_entries, FileLogSink, LogEntry, LogSink, MemoryLogSink};
+#[cfg(unix)]
+pub use local_control::UnixLocalControlServer;
+pub use local_control::{
+    handle_local_control_request, prepare_local_control_paths, read_local_control_token,
+    LocalControlDispatcher, LocalControlError, LocalControlPaths, LocalControlRequest,
+    LocalControlResponse, LOCAL_CONTROL_PROTOCOL_VERSION,
+};
+pub use logs::{
+    read_recent_log_entries, redact_log_entry_for_local_output, FileLogSink, LogEntry, LogSink,
+    MemoryLogSink,
+};
 pub use management::{
-    ApiKeyExchangeResult, AuthTokenResponse, CredentialStorageBackend, CredentialStorageOutcome,
-    CredentialStore, DeviceLoginChallenge, HttpManagementApiClient, HumanRequestExecution,
-    HumanRequestResolveResponse, HumanRequestSummary, LocalCredentialStore, ManagementApiClient,
-    ManagementCredential, ManagementProjectRunnerBinding, Organization, Project,
-    ProjectRunnerBindingCreateRequest, Runner, RunnerUpsertRequest,
-    RunnerWorkflowExecutionListResponse, RunnerWorkflowExecutionResponse, RunnerWorkflowSummary,
+    user_credential_profile, ApiKeyExchangeResult, AuthTokenResponse, CredentialKind,
+    CredentialStorageBackend, CredentialStorageOutcome, CredentialStore, DeviceLoginChallenge,
+    HttpManagementApiClient, HumanRequestExecution, HumanRequestResolveResponse,
+    HumanRequestSummary, LocalCredentialStore, ManagementApiClient, ManagementCredential,
+    ManagementProjectRunnerBinding, Organization, Project, ProjectRunnerBindingCreateRequest,
+    Runner, RunnerHumanRequestListQuery, RunnerHumanRequestListResponse,
+    RunnerJobEventCreateResponse, RunnerJobResponse, RunnerSessionResponse, RunnerUpsertRequest,
+    RunnerWorkflowExecutionListResponse, RunnerWorkflowExecutionResponse,
+    RunnerWorkflowExecutionStartOptions, RunnerWorkflowInputSchemaResponse, RunnerWorkflowSummary,
     StreamCredentialRequest, StreamCredentialResponse, SystemCredentialStore,
     WorkflowRunStartRequest, WorkflowRunStartResponse, WorkspaceLoginResult,
 };
@@ -81,11 +98,11 @@ pub use operational_readiness::{
     OPERATIONAL_READINESS_REPORT_SCHEMA_VERSION,
 };
 pub use policy::{
-    enforce_managed_policy_version, managed_policy_engine, policy_applies_to_runner,
-    rollback_managed_policy, validate_managed_policy_document, CapabilitySupport,
-    ManagedPolicyDocument, ManagedPolicySnapshot, ManagedPolicyVersionState, PolicyDecision,
-    PolicyEngine, PolicyEvaluation, PolicyEvaluationInput, PolicyLayer, PolicyRule, PolicySet,
-    PolicySource,
+    enforce_managed_policy_version, enforce_policy_decision, managed_policy_engine,
+    policy_applies_to_runner, rollback_managed_policy, validate_managed_policy_document,
+    CapabilitySupport, ManagedPolicyDocument, ManagedPolicySnapshot, ManagedPolicyVersionState,
+    PolicyDecision, PolicyEngine, PolicyEvaluation, PolicyEvaluationInput, PolicyLayer, PolicyRule,
+    PolicySet, PolicySource,
 };
 pub use release_distribution::{
     official_compatibility_matrix, official_distribution_installers,
@@ -105,6 +122,11 @@ pub use runtime_guard::{
     acquire_runner_runtime_guard, cleanup_stale_runner_runtime_guard, read_runner_runtime_guard,
     release_runner_runtime_guard_for_surface, release_runner_runtime_guard_owned,
     runner_runtime_guard_path, RunnerRuntimeGuard, RunnerRuntimeGuardInfo,
+};
+pub use runtime_install::{
+    default_runtime_root, BundledRuntimeInstall, InstalledRuntime, RuntimeActivation,
+    RuntimeInstallLayout, RuntimeInstallOutcome, RuntimeInstaller, VerifiedRuntimeInstall,
+    RUNTIME_HOME_ENV, RUNTIME_INSTALL_METADATA_SCHEMA_VERSION,
 };
 pub use security::{
     ChildEnvironmentPolicy, IpNetworkRange, LocalSecurityPolicy, NetworkSecurityPolicy,
