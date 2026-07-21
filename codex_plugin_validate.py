@@ -35,12 +35,66 @@ MACHINE_PATH_PATTERNS = {
 }
 FORBIDDEN_NAMES = {".env", "id_rsa", "id_ed25519", "credentials", "credentials.json"}
 TEXT_SCAN_LIMIT = 4 * 1024 * 1024
+NATIVE_SCAN_LIMIT = 128 * 1024 * 1024
 SUPPORTED_TARGETS = {
     "darwin-arm64",
     "darwin-x64",
     "linux-arm64",
     "linux-x64",
 }
+
+
+def native_payload_target(relative: Path) -> str | None:
+    """Return the target only for the two exact assembled plugin layouts."""
+    parts = relative.parts
+    if len(parts) == 3:
+        prefix: tuple[str, ...] = ()
+        bin_name, target, executable = parts
+    elif len(parts) == 5:
+        prefix = parts[:2]
+        bin_name, target, executable = parts[2:]
+    else:
+        return None
+    if (
+        prefix not in {(), ("plugins", "loomex")}
+        or bin_name != "bin"
+        or target not in SUPPORTED_TARGETS
+        or executable not in {"loomex", "loomex-mcp"}
+    ):
+        return None
+    return target
+
+
+def has_native_magic(prefix: bytes, target: str) -> bool:
+    if target.startswith("linux-"):
+        if len(prefix) < 64 or prefix[:4] != b"\x7fELF":
+            return False
+        # Release targets are 64-bit, little-endian ELF. Check the identifying
+        # fields and the fixed-size ELF64 header so a magic-only blob cannot be
+        # treated as a native executable.
+        if prefix[4:7] != bytes((2, 1, 1)):
+            return False
+        machine = int.from_bytes(prefix[18:20], "little")
+        expected_machine = 62 if target == "linux-x64" else 183
+        return (
+            int.from_bytes(prefix[16:18], "little") in {2, 3}
+            and machine == expected_machine
+            and int.from_bytes(prefix[20:24], "little") == 1
+            and int.from_bytes(prefix[52:54], "little") == 64
+        )
+
+    if len(prefix) < 32:
+        return False
+    if prefix[:4] == b"\xcf\xfa\xed\xfe":
+        byteorder = "little"
+    elif prefix[:4] == b"\xfe\xed\xfa\xcf":
+        byteorder = "big"
+    else:
+        return False
+    cpu_type = int.from_bytes(prefix[4:8], byteorder)
+    expected_cpu_type = 0x01000007 if target == "darwin-x64" else 0x0100000C
+    file_type = int.from_bytes(prefix[12:16], byteorder)
+    return cpu_type == expected_cpu_type and file_type == 2
 
 
 def parse_args() -> argparse.Namespace:
@@ -87,21 +141,24 @@ def validate_tree(root: Path) -> list[str]:
         except OSError as error:
             failures.append(f"cannot read {relative}: {error}")
             continue
-        # Skip only the four known native payload names. Their complete bytes
-        # are checked against the release manifest below. A NUL byte in any
-        # other file must not bypass the package secret/path scan.
-        parts = relative.parts
-        known_native = (
-            len(parts) == 3
-            and parts[0] == "bin"
-            and parts[1] in SUPPORTED_TARGETS
-            and parts[2] in {"loomex", "loomex-mcp"}
-        )
-        if b"\0" in prefix and known_native:
-            continue
+        target = native_payload_target(relative)
+        if target is not None:
+            if (info.st_mode & 0o111) == 0:
+                failures.append(f"native payload is not executable: {relative}")
+            if not has_native_magic(prefix, target):
+                failures.append(
+                    f"native payload does not have the expected executable format: {relative}"
+                )
+                continue
+            if info.st_size > NATIVE_SCAN_LIMIT:
+                failures.append(f"native payload is too large to safety scan: {relative}")
+                continue
         if info.st_size > TEXT_SCAN_LIMIT:
-            failures.append(f"oversized non-binary file cannot be safety scanned: {relative}")
-            continue
+            if target is None:
+                failures.append(
+                    f"oversized non-binary file cannot be safety scanned: {relative}"
+                )
+                continue
         try:
             data = path.read_bytes()
         except OSError as error:

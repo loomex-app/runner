@@ -33,6 +33,24 @@ ROOT = Path(__file__).resolve().parent
 ASSEMBLER = ROOT / "codex_plugin_assemble.py"
 
 
+def native_test_header(target: str) -> bytes:
+    if target.startswith("linux-"):
+        header = bytearray(64)
+        header[:7] = b"\x7fELF\x02\x01\x01"
+        header[16:18] = (3).to_bytes(2, "little")
+        machine = 62 if target == "linux-x64" else 183
+        header[18:20] = machine.to_bytes(2, "little")
+        header[20:24] = (1).to_bytes(4, "little")
+        header[52:54] = (64).to_bytes(2, "little")
+        return bytes(header)
+    header = bytearray(32)
+    header[:4] = b"\xcf\xfa\xed\xfe"
+    cpu_type = 0x01000007 if target == "darwin-x64" else 0x0100000C
+    header[4:8] = cpu_type.to_bytes(4, "little")
+    header[12:16] = (2).to_bytes(4, "little")
+    return bytes(header)
+
+
 class SourcePluginContractTest(unittest.TestCase):
     @staticmethod
     def write_artifacts(root: Path) -> None:
@@ -1079,8 +1097,11 @@ class AssemblePluginTest(unittest.TestCase):
         for target in targets:
             directory = self.artifacts / target
             directory.mkdir(parents=True)
-            (directory / "loomex").write_bytes(f"cli-{target}".encode())
-            (directory / "loomex-mcp").write_bytes(f"mcp-{target}".encode())
+            header = native_test_header(target)
+            (directory / "loomex").write_bytes(header + f"cli-{target}".encode())
+            (directory / "loomex-mcp").write_bytes(
+                header + f"mcp-{target}".encode()
+            )
             self.write_signing_marker(target)
 
     def write_signing_marker(self, target: str, *, signed: bool = False) -> None:
@@ -1426,6 +1447,76 @@ class AssemblePluginTest(unittest.TestCase):
             b"\0token=ghp_abcdefghijklmnopqrstuvwxyz123456\n"
         )
         self.assertIn("GitHub token detected in notes.dat", validate_tree(package))
+
+    def test_marketplace_native_payload_is_format_checked_and_safety_scanned(self) -> None:
+        package = self.temp / "marketplace"
+        native = package / "plugins/loomex/bin/linux-x64/loomex-mcp"
+        native.parent.mkdir(parents=True)
+        native.write_bytes(
+            native_test_header("linux-x64")
+            + b"workspace=/home/example/private/repo\n"
+            b"token=ghp_abcdefghijklmnopqrstuvwxyz123456\n"
+        )
+        native.chmod(0o755)
+
+        failures = validate_tree(package)
+
+        self.assertIn(
+            "Linux user path detected in plugins/loomex/bin/linux-x64/loomex-mcp",
+            failures,
+        )
+        self.assertIn(
+            "GitHub token detected in plugins/loomex/bin/linux-x64/loomex-mcp",
+            failures,
+        )
+
+    def test_known_native_payload_requires_executable_mode_and_target_magic(self) -> None:
+        package = self.temp / "bad-native"
+        native = package / "bin/darwin-arm64/loomex"
+        native.parent.mkdir(parents=True)
+        native.write_bytes(b"not a Mach-O executable")
+        native.chmod(0o644)
+
+        failures = validate_tree(package)
+
+        self.assertIn("native payload is not executable: bin/darwin-arm64/loomex", failures)
+        self.assertIn(
+            "native payload does not have the expected executable format: bin/darwin-arm64/loomex",
+            failures,
+        )
+
+    def test_known_native_payload_rejects_magic_only_and_cross_arch_headers(self) -> None:
+        wrong_elf_class = bytearray(native_test_header("linux-x64"))
+        wrong_elf_class[4] = 1
+        wrong_elf_data = bytearray(native_test_header("linux-x64"))
+        wrong_elf_data[5] = 2
+        malformed_macho = bytearray(native_test_header("darwin-arm64"))
+        malformed_macho[12:16] = (0).to_bytes(4, "little")
+        cases = (
+            ("linux-x64", b"\x7fELF", "magic-only ELF"),
+            ("linux-x64", bytes(wrong_elf_class), "32-bit ELF"),
+            ("linux-x64", bytes(wrong_elf_data), "big-endian ELF"),
+            ("linux-x64", native_test_header("linux-arm64"), "cross-arch ELF"),
+            ("darwin-arm64", b"\xcf\xfa\xed\xfe", "magic-only Mach-O"),
+            ("darwin-arm64", bytes(malformed_macho), "non-executable Mach-O"),
+            (
+                "darwin-arm64",
+                native_test_header("darwin-x64"),
+                "cross-arch Mach-O",
+            ),
+        )
+        for target, payload, label in cases:
+            with self.subTest(label):
+                package = self.temp / label.replace(" ", "-")
+                native = package / f"bin/{target}/loomex"
+                native.parent.mkdir(parents=True)
+                native.write_bytes(payload)
+                native.chmod(0o755)
+
+                self.assertIn(
+                    f"native payload does not have the expected executable format: bin/{target}/loomex",
+                    validate_tree(package),
+                )
 
     def test_runtime_integrity_validation_detects_cli_tampering(self) -> None:
         result = self.assemble()

@@ -180,6 +180,9 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          RUSTFLAGS: >-
+            --remap-path-prefix=/home/runner=/build
+            --remap-path-prefix=/Users/runner=/build
         run: >-
           cargo build --release --locked
           -p loomex-cli -p loomex-mcp
