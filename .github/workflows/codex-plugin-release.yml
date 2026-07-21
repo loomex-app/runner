@@ -34,6 +34,8 @@ env:
   CARGO_TERM_COLOR: always
   CODEX_VALIDATOR_COMMIT: 1836ae0612052137d0cabaff7807ff8314cee940
   MINIMUM_GLIBC: "2.35"
+  SIGSTORE_ROOT_COMMIT: a394944ec0ec1dd5e8ba50471e9ded37d88b5daa
+  SIGSTORE_ROOT_SHA256: 6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66
 
 jobs:
   source-validation:
@@ -300,6 +302,7 @@ jobs:
       marketplace-archive: ${{ steps.metadata.outputs.marketplace-archive }}
       marketplace-provenance: ${{ steps.metadata.outputs.marketplace-provenance }}
       marketplace-installer: ${{ steps.metadata.outputs.marketplace-installer }}
+      stable-installer: ${{ steps.metadata.outputs.stable-installer }}
       artifact-name: ${{ steps.metadata.outputs.artifact-name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -341,6 +344,7 @@ jobs:
           marketplace_archive="loomex-codex-marketplace-$version.zip"
           marketplace_provenance="loomex-codex-marketplace-$version.provenance.json"
           marketplace_installer="loomex-install-marketplace-$version.sh"
+          stable_installer="install-codex.sh"
           if [ "$RELEASE_MODE" = "true" ]; then
             artifact_name="loomex-codex-plugin-$version-unsigned-platform"
           else
@@ -351,6 +355,7 @@ jobs:
           echo "marketplace-archive=$marketplace_archive" >> "$GITHUB_OUTPUT"
           echo "marketplace-provenance=$marketplace_provenance" >> "$GITHUB_OUTPUT"
           echo "marketplace-installer=$marketplace_installer" >> "$GITHUB_OUTPUT"
+          echo "stable-installer=$stable_installer" >> "$GITHUB_OUTPUT"
           echo "artifact-name=$artifact_name" >> "$GITHUB_OUTPUT"
       - name: Assemble native files and integrity manifest
         shell: bash
@@ -377,6 +382,20 @@ jobs:
             args+=(--signing-state unsigned-validation)
           fi
           python3 codex_plugin_assemble.py "${args[@]}"
+          python3 - "${{ steps.metadata.outputs.version }}" <<'PY'
+          import os
+          import pathlib
+          import sys
+
+          source = pathlib.Path("plugin/loomex/scripts/install-codex.sh")
+          destination = pathlib.Path("dist/install-codex.sh")
+          value = source.read_text(encoding="utf-8")
+          token = "@LOOMEX_RELEASE_VERSION@"
+          if value.count(token) != 1:
+              raise SystemExit("stable installer must contain exactly one version token")
+          destination.write_text(value.replace(token, sys.argv[1]), encoding="utf-8")
+          os.chmod(destination, 0o755)
+          PY
       - name: Run release validator and safety scan
         run: >-
           python3 codex_plugin_validate.py dist/loomex
@@ -412,6 +431,7 @@ jobs:
             dist/${{ steps.metadata.outputs.marketplace-archive }}.sha256
             dist/${{ steps.metadata.outputs.marketplace-provenance }}
             dist/${{ steps.metadata.outputs.marketplace-installer }}
+            dist/${{ steps.metadata.outputs.stable-installer }}
           if-no-files-found: error
           retention-days: ${{ env.RELEASE_MODE == 'true' && 30 || 7 }}
 
@@ -431,6 +451,8 @@ jobs:
           name: ${{ needs.assemble.outputs.artifact-name }}
           path: release
       - uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
+        with:
+          cosign-release: v3.1.2
       - name: Keyless-sign and verify immutable release blobs
         shell: bash
         run: |
@@ -440,11 +462,17 @@ jobs:
           sha256sum -c "${{ needs.assemble.outputs.marketplace-archive }}.sha256"
           provenance="${{ needs.assemble.outputs.marketplace-provenance }}"
           test -s "$provenance"
+          trusted_root="$RUNNER_TEMP/sigstore-trusted-root.json"
+          curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+            --output "$trusted_root" \
+            "https://raw.githubusercontent.com/sigstore/root-signing/$SIGSTORE_ROOT_COMMIT/targets/trusted_root.json"
+          printf '%s  %s\n' "$SIGSTORE_ROOT_SHA256" "$trusted_root" | sha256sum -c -
           workflow_identity="https://github.com/${GITHUB_WORKFLOW_REF}"
-          for name in "${{ needs.assemble.outputs.archive }}" "${{ needs.assemble.outputs.marketplace-archive }}" "$provenance" "${{ needs.assemble.outputs.marketplace-installer }}"; do
+          for name in "${{ needs.assemble.outputs.archive }}" "${{ needs.assemble.outputs.marketplace-archive }}" "$provenance" "${{ needs.assemble.outputs.marketplace-installer }}" "${{ needs.assemble.outputs.stable-installer }}"; do
             cosign sign-blob --yes --bundle "$name.sigstore.json" "$name"
             cosign verify-blob \
               --bundle "$name.sigstore.json" \
+              --trusted-root "$trusted_root" \
               --certificate-identity "$workflow_identity" \
               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
               "$name"
@@ -463,6 +491,8 @@ jobs:
             release/loomex-codex-marketplace-${{ needs.assemble.outputs.version }}.provenance.json.sigstore.json
             release/${{ needs.assemble.outputs.marketplace-installer }}
             release/${{ needs.assemble.outputs.marketplace-installer }}.sigstore.json
+            release/${{ needs.assemble.outputs.stable-installer }}
+            release/${{ needs.assemble.outputs.stable-installer }}.sigstore.json
           if-no-files-found: error
           retention-days: 90
   publish-marketplace:
@@ -483,20 +513,31 @@ jobs:
           name: loomex-codex-plugin-${{ needs.assemble.outputs.version }}-SIGSTORE-SIGNED
           path: ${{ runner.temp }}/release
       - uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
+        with:
+          cosign-release: v3.1.2
       - name: Publish content-addressed assembled marketplace tree
         shell: bash
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/release"
           sha256sum -c "${{ needs.assemble.outputs.marketplace-archive }}.sha256"
+          trusted_root="$RUNNER_TEMP/sigstore-trusted-root.json"
+          curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+            --output "$trusted_root" \
+            "https://raw.githubusercontent.com/sigstore/root-signing/$SIGSTORE_ROOT_COMMIT/targets/trusted_root.json"
+          printf '%s  %s\n' "$SIGSTORE_ROOT_SHA256" "$trusted_root" | sha256sum -c -
           workflow_identity="https://github.com/${GITHUB_WORKFLOW_REF}"
+          expected_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/codex-plugin-release.yml@refs/tags/v${{ needs.assemble.outputs.version }}"
+          test "$workflow_identity" = "$expected_identity"
           cosign verify-blob \
             --bundle "${{ needs.assemble.outputs.marketplace-archive }}.sigstore.json" \
+            --trusted-root "$trusted_root" \
             --certificate-identity "$workflow_identity" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${{ needs.assemble.outputs.marketplace-archive }}"
           cosign verify-blob \
             --bundle "${{ needs.assemble.outputs.marketplace-provenance }}.sigstore.json" \
+            --trusted-root "$trusted_root" \
             --certificate-identity "$workflow_identity" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${{ needs.assemble.outputs.marketplace-provenance }}"
@@ -599,6 +640,8 @@ jobs:
           name: loomex-codex-plugin-${{ needs.assemble.outputs.version }}-SIGSTORE-SIGNED
           path: release
       - uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
+        with:
+          cosign-release: v3.1.2
       - name: Reverify signed blobs and reject existing same-version assets
         shell: bash
         run: |
@@ -606,14 +649,23 @@ jobs:
           cd release
           sha256sum -c "${{ needs.assemble.outputs.archive }}.sha256"
           sha256sum -c "${{ needs.assemble.outputs.marketplace-archive }}.sha256"
+          trusted_root="$RUNNER_TEMP/sigstore-trusted-root.json"
+          curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+            --output "$trusted_root" \
+            "https://raw.githubusercontent.com/sigstore/root-signing/$SIGSTORE_ROOT_COMMIT/targets/trusted_root.json"
+          printf '%s  %s\n' "$SIGSTORE_ROOT_SHA256" "$trusted_root" | sha256sum -c -
           workflow_identity="https://github.com/${GITHUB_WORKFLOW_REF}"
+          expected_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/codex-plugin-release.yml@refs/tags/v${{ needs.assemble.outputs.version }}"
+          test "$workflow_identity" = "$expected_identity"
           for name in \
             "${{ needs.assemble.outputs.archive }}" \
             "${{ needs.assemble.outputs.marketplace-archive }}" \
             "${{ needs.assemble.outputs.marketplace-provenance }}" \
-            "${{ needs.assemble.outputs.marketplace-installer }}"; do
+            "${{ needs.assemble.outputs.marketplace-installer }}" \
+            "${{ needs.assemble.outputs.stable-installer }}"; do
             cosign verify-blob \
               --bundle "$name.sigstore.json" \
+              --trusted-root "$trusted_root" \
               --certificate-identity "$workflow_identity" \
               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
               "$name"
@@ -653,6 +705,8 @@ jobs:
               os.environ["MARKETPLACE_PROVENANCE"] + ".sigstore.json",
               os.environ["MARKETPLACE_INSTALLER"],
               os.environ["MARKETPLACE_INSTALLER"] + ".sigstore.json",
+              os.environ["STABLE_INSTALLER"],
+              os.environ["STABLE_INSTALLER"] + ".sigstore.json",
           }
           existing = sorted(
               asset["name"] for asset in release.get("assets", [])
@@ -670,6 +724,7 @@ jobs:
           MARKETPLACE_ARCHIVE: ${{ needs.assemble.outputs.marketplace-archive }}
           MARKETPLACE_PROVENANCE: ${{ needs.assemble.outputs.marketplace-provenance }}
           MARKETPLACE_INSTALLER: ${{ needs.assemble.outputs.marketplace-installer }}
+          STABLE_INSTALLER: ${{ needs.assemble.outputs.stable-installer }}
       - name: Revalidate live release tag immediately before asset publication
         shell: bash
         env:
@@ -730,3 +785,6 @@ jobs:
             release/${{ needs.assemble.outputs.marketplace-provenance }}.sigstore.json
             release/${{ needs.assemble.outputs.marketplace-installer }}
             release/${{ needs.assemble.outputs.marketplace-installer }}.sigstore.json
+            release/${{ needs.assemble.outputs.stable-installer }}
+            release/${{ needs.assemble.outputs.stable-installer }}.sigstore.json
+          make_latest: true

@@ -16,12 +16,38 @@ normal installation flow.
 
 ## Install from the Loomex marketplace
 
-Each release publishes a complete Codex marketplace snapshot, provenance, and
-`loomex-install-marketplace-<version>.sh`, each with a keyless Sigstore bundle.
-Download the installer and its `.sigstore.json` bundle together with
-`loomex-codex-marketplace-<version>.provenance.json` and its bundle. From that
-directory, run this single fail-closed bootstrap command. It opens the installer
-twice before verification, confirms both descriptors identify the same file,
+The normal installation is one command on macOS and Linux:
+
+```bash
+curl -fsSL https://github.com/loomex-app/runner/releases/latest/download/install-codex.sh | sh
+```
+
+GitHub selects the latest stable, non-prerelease release. That release's version
+is embedded in the downloaded script, which then uses version-specific asset
+URLs authenticated by Sigstore. It obtains a temporary pinned Cosign binary and
+verifies its pinned SHA-256, downloads an official Sigstore trusted-root
+snapshot from a pinned commit and verifies its SHA-256, and verifies both the
+versioned installer and marketplace provenance before any Codex change. It does
+not install Cosign
+globally, modify Loomex credentials/backend configuration, bypass macOS
+quarantine, or use insecure Sigstore options.
+
+Release CI refuses to overwrite same-version assets, but a repository
+administrator can still change GitHub tags or release assets unless GitHub's
+immutable-release and tag-protection controls are enabled. Installation trust
+therefore comes from verification of the exact workflow/tag Sigstore identity,
+not from treating a GitHub tag or asset name as inherently immutable.
+
+The `curl | sh` convenience path necessarily trusts GitHub TLS for the bootstrap
+script itself. For high-assurance installation, download `install-codex.sh` and
+`install-codex.sh.sigstore.json` from the same release, verify the script with
+Cosign against the exact workflow/tag identity below, and then run the verified
+file. Each release also publishes a complete Codex marketplace snapshot,
+provenance, and `loomex-install-marketplace-<version>.sh`, each with a keyless
+Sigstore bundle.
+
+The lower-level verified installer opens the versioned installer twice before
+verification, confirms both descriptors identify the same file,
 verifies one descriptor against the pinned GitHub issuer/workflow/tag identity,
 and executes the other descriptor without reopening the pathname:
 
@@ -58,11 +84,12 @@ issuer and workflow identity. Only then extract the ZIP, pass its directory to
 `codex plugin marketplace add`, and run the same
 `codex plugin add loomex@loomex` command.
 
-Run the verified installer again to upgrade. It inspects the existing Codex
+Run the one-command installer again to upgrade. It inspects the existing Codex
 marketplace and plugin state, does nothing when the same exact commit is already
 installed, and otherwise replaces the marketplace with the newly verified
 exact commit. If any upgrade step fails, it restores the previous checkout by
-its captured exact commit and restores whether the plugin was installed. A
+its captured exact commit—or the previous local marketplace path—and restores
+whether the plugin was installed. A
 pre-existing sparse or disabled Loomex installation is rejected before any
 change because the current Codex CLI cannot reproduce that state safely.
 

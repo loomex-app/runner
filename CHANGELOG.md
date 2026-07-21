@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 - 2026-07-21
+
+- Add a one-command GitHub-hosted Codex installer for macOS and Linux.
+- Bootstrap Cosign with pinned checksums and an official pinned Sigstore trust root.
+- Preserve transactional upgrades and rollback from legacy local marketplaces.
+
 ## 0.1.1 - 2026-07-21
 
 - Use the current Runner Control API for runner identity and health checks.

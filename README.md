@@ -102,6 +102,17 @@ Gatekeeper, notarization, and auto-update notes.
 
 ## Release security
 
+Install the latest stable Loomex Codex plugin on macOS or Linux with:
+
+```bash
+curl -fsSL https://github.com/loomex-app/runner/releases/latest/download/install-codex.sh | sh
+```
+
+The bootstrap verifies all versioned installation material with Sigstore before
+changing Codex. See [plugin/loomex/README.md](plugin/loomex/README.md) for the
+two-step verification path and the inherent GitHub TLS trust boundary of
+`curl | sh`.
+
 Release artifacts are verified through signed manifests, SHA-256 checksums,
 artifact signatures, SBOM entries, and build provenance. `loomex runner release`
 provides the local signing and verification helpers used by release CI:
