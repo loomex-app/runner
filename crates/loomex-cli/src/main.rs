@@ -5847,15 +5847,26 @@ fn run_runner_control_service_loop<C: ManagementApiClient>(
     recovery: &mut RunnerJobRecoveryJournal,
     log_path: &Path,
 ) -> Result<(), String> {
-    let mut retry_delay = Duration::from_secs(1);
+    let mut backoff = RunnerControlReconnectBackoff::new();
     loop {
+        let mut session_healthy = false;
         let result = run_runner_control_session(
-            client, credential, resolved, binding_id, recovery, log_path,
+            client,
+            credential,
+            resolved,
+            binding_id,
+            recovery,
+            log_path,
+            &mut || session_healthy = true,
         );
+        if session_healthy {
+            backoff.control_operation_succeeded();
+        }
         match result {
             Ok(()) => return Ok(()),
             Err(err) if is_terminal_service_runtime_error(&err) => return Err(err),
             Err(err) => {
+                let retry_delay = backoff.next_retry_delay();
                 let _ = append_runner_service_log(
                     log_path,
                     credential,
@@ -5869,9 +5880,34 @@ fn run_runner_control_service_loop<C: ManagementApiClient>(
                     retry_delay.as_secs()
                 );
                 thread::sleep(retry_delay);
-                retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(30));
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerControlReconnectBackoff {
+    retry_delay: Duration,
+}
+
+impl RunnerControlReconnectBackoff {
+    fn new() -> Self {
+        Self {
+            retry_delay: Duration::from_secs(1),
+        }
+    }
+
+    fn control_operation_succeeded(&mut self) {
+        self.retry_delay = Duration::from_secs(1);
+    }
+
+    fn next_retry_delay(&mut self) -> Duration {
+        let delay = self.retry_delay;
+        self.retry_delay = self
+            .retry_delay
+            .saturating_mul(2)
+            .min(Duration::from_secs(30));
+        delay
     }
 }
 
@@ -5882,6 +5918,7 @@ fn run_runner_control_session<C: ManagementApiClient>(
     binding_id: &str,
     recovery: &mut RunnerJobRecoveryJournal,
     log_path: &Path,
+    on_session_healthy: &mut dyn FnMut(),
 ) -> Result<(), String> {
     let session = create_runner_control_session(client, credential, resolved, binding_id)?;
     let session_id = session_id_from_response(&session)?;
@@ -5897,9 +5934,14 @@ fn run_runner_control_session<C: ManagementApiClient>(
     eprintln!("runner control session connected: {session_id}");
     recover_pending_runner_jobs(client, credential, resolved, &session_id, recovery)?;
     let mut idle_ticks = 0usize;
+    let mut session_health_confirmed = false;
     loop {
         let processed =
             process_one_runner_control_job(client, credential, resolved, &session_id, recovery)?;
+        if !session_health_confirmed {
+            on_session_healthy();
+            session_health_confirmed = true;
+        }
         if processed {
             idle_ticks = 0;
             continue;
@@ -11191,6 +11233,101 @@ mod tests {
     }
 
     #[test]
+    fn runner_control_reconnect_backoff_resets_after_control_operation_succeeds() {
+        let mut backoff = RunnerControlReconnectBackoff::new();
+
+        let accumulated_delays =
+            [1, 2, 4, 8, 16, 30, 30].map(|_| backoff.next_retry_delay().as_secs());
+        assert_eq!([1, 2, 4, 8, 16, 30, 30], accumulated_delays);
+
+        backoff.control_operation_succeeded();
+
+        assert_eq!(Duration::from_secs(1), backoff.next_retry_delay());
+        assert_eq!(Duration::from_secs(2), backoff.next_retry_delay());
+    }
+
+    #[test]
+    fn runner_control_flapping_sessions_keep_backing_off_until_control_succeeds() {
+        let mut backoff = RunnerControlReconnectBackoff::new();
+
+        // Each session creation succeeds, but recovery or the first lease poll
+        // fails. Creation alone must not reset the accumulated delay.
+        assert_eq!(Duration::from_secs(1), backoff.next_retry_delay());
+        assert_eq!(Duration::from_secs(2), backoff.next_retry_delay());
+        assert_eq!(Duration::from_secs(4), backoff.next_retry_delay());
+
+        // Recovery plus the first successful control operation proves that the
+        // session is healthy. A later transient disconnect starts again at 1s.
+        backoff.control_operation_succeeded();
+        assert_eq!(Duration::from_secs(1), backoff.next_retry_delay());
+    }
+
+    #[test]
+    fn runner_control_session_health_requires_a_successful_lease_poll() {
+        let resolved = service_resolved_settings();
+        let credential = credential("default", "org_123");
+        let transport_error =
+            || loomex_core::CoreError::new("RUNNER_CONTROL_HTTP_FAILED", "temporary failure");
+        let mut client = FakeManagementClient {
+            runner_job_lease_errors: vec![
+                Some(transport_error()),
+                Some(transport_error()),
+                Some(transport_error()),
+                None,
+                Some(transport_error()),
+            ],
+            ..Default::default()
+        };
+        let recovery_path = env::temp_dir().join(format!(
+            "loomex-reconnect-recovery-{}-{}.json",
+            process::id(),
+            current_epoch_ms().unwrap()
+        ));
+        let log_path = recovery_path.with_extension("log");
+        let mut recovery = RunnerJobRecoveryJournal::open(&recovery_path).unwrap();
+        let mut backoff = RunnerControlReconnectBackoff::new();
+
+        for expected_delay in [1, 2, 4] {
+            let mut session_healthy = false;
+            let error = run_runner_control_session(
+                &mut client,
+                &credential,
+                &resolved,
+                "binding_123",
+                &mut recovery,
+                &log_path,
+                &mut || session_healthy = true,
+            )
+            .unwrap_err();
+            assert!(error.contains("RUNNER_CONTROL_HTTP_FAILED"));
+            assert!(!session_healthy, "session creation alone is not healthy");
+            assert_eq!(
+                Duration::from_secs(expected_delay),
+                backoff.next_retry_delay()
+            );
+        }
+
+        let mut session_healthy = false;
+        let error = run_runner_control_session(
+            &mut client,
+            &credential,
+            &resolved,
+            "binding_123",
+            &mut recovery,
+            &log_path,
+            &mut || session_healthy = true,
+        )
+        .unwrap_err();
+        assert!(error.contains("RUNNER_CONTROL_HTTP_FAILED"));
+        assert!(session_healthy, "the first lease poll succeeded");
+        backoff.control_operation_succeeded();
+        assert_eq!(Duration::from_secs(1), backoff.next_retry_delay());
+
+        let _ = fs::remove_file(recovery_path);
+        let _ = fs::remove_file(log_path);
+    }
+
+    #[test]
     fn runner_stop_does_not_remove_live_guard_owned_by_app() {
         let config_path = temp_config_path("runner-stop-foreign-guard");
         let binding_id = format!("binding_runner_stop_foreign_{}", process::id());
@@ -14329,6 +14466,7 @@ mod tests {
         last_human_resolution: Option<Value>,
         runner_session_response: Option<loomex_core::RunnerSessionResponse>,
         runner_jobs: Vec<Value>,
+        runner_job_lease_errors: Vec<Option<loomex_core::CoreError>>,
         completed_runner_jobs: Vec<Value>,
         failed_runner_jobs: Vec<Value>,
     }
@@ -14722,6 +14860,11 @@ mod tests {
             _credential: &ManagementCredential,
             _session_id: &str,
         ) -> loomex_core::CoreResult<loomex_core::RunnerJobResponse> {
+            if !self.runner_job_lease_errors.is_empty() {
+                if let Some(error) = self.runner_job_lease_errors.remove(0) {
+                    return Err(error);
+                }
+            }
             Ok(loomex_core::RunnerJobResponse {
                 job: if self.runner_jobs.is_empty() {
                     None
