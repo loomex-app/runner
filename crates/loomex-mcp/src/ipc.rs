@@ -336,28 +336,39 @@ impl BootstrapClient {
             });
         }
 
-        let error: Value = serde_json::from_slice(&output.stderr).unwrap_or_else(|_| {
-            json!({
-                "code": "BOOTSTRAP_COMMAND_FAILED",
-                "message": String::from_utf8_lossy(&output.stderr).trim()
-            })
-        });
-        Err(ClientError::Remote(ControlError {
-            code: error
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or("BOOTSTRAP_COMMAND_FAILED")
-                .to_string(),
-            message: error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("the bundled Loomex bootstrap command failed")
-                .to_string(),
-            retryable: error
-                .get("retryable")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        }))
+        Err(ClientError::Remote(parse_bootstrap_error(&output.stderr)))
+    }
+}
+
+fn parse_bootstrap_error(stderr: &[u8]) -> ControlError {
+    let error: Value = serde_json::from_slice(stderr).unwrap_or_else(|_| {
+        json!({
+            "code": "BOOTSTRAP_COMMAND_FAILED",
+            "message": String::from_utf8_lossy(stderr).trim()
+        })
+    });
+    let nested = error.get("error").filter(|value| value.is_object());
+    let string_field = |field| {
+        nested
+            .and_then(|value| value.get(field))
+            .and_then(Value::as_str)
+            .or_else(|| error.get(field).and_then(Value::as_str))
+    };
+    let bool_field = |field| {
+        nested
+            .and_then(|value| value.get(field))
+            .and_then(Value::as_bool)
+            .or_else(|| error.get(field).and_then(Value::as_bool))
+    };
+
+    ControlError {
+        code: string_field("code")
+            .unwrap_or("BOOTSTRAP_COMMAND_FAILED")
+            .to_string(),
+        message: string_field("message")
+            .unwrap_or("the bundled Loomex bootstrap command failed")
+            .to_string(),
+        retryable: bool_field("retryable").unwrap_or(false),
     }
 }
 
@@ -846,8 +857,8 @@ printf '{"schemaVersion":"loomex.cli.pluginControl/v1","method":"%s","result":{"
         fs::write(
             &executable,
             r#"#!/bin/sh
-printf '%s' '{"schemaVersion":"loomex.cli.error/v1","code":"SETUP_PLAN_REQUIRED","message":"plan first"}' >&2
-exit 2
+printf '%s' '{"schemaVersion":"loomex.cli.error/v1","error":{"code":"MANAGEMENT_HTTP_FAILED","message":"connection refused","retryable":true},"exitCode":20}' >&2
+exit 20
 "#,
         )
         .unwrap();
@@ -859,7 +870,30 @@ exit 2
             .await
             .unwrap_err();
 
-        assert_eq!(error.code(), "SETUP_PLAN_REQUIRED");
-        assert_eq!(error.to_string(), "plan first");
+        assert_eq!(error.code(), "MANAGEMENT_HTTP_FAILED");
+        assert_eq!(error.to_string(), "connection refused");
+        assert!(error.retryable());
+    }
+
+    #[test]
+    fn bootstrap_error_parser_reads_nested_retryability() {
+        let error = parse_bootstrap_error(
+            br#"{"schemaVersion":"loomex.cli.error/v1","error":{"code":"HTTP_ERROR","message":"backend unavailable","retryable":true},"exitCode":20}"#,
+        );
+
+        assert_eq!(error.code, "HTTP_ERROR");
+        assert_eq!(error.message, "backend unavailable");
+        assert!(error.retryable);
+    }
+
+    #[test]
+    fn bootstrap_error_parser_remains_compatible_with_top_level_errors() {
+        let error = parse_bootstrap_error(
+            br#"{"schemaVersion":"loomex.cli.error/v1","code":"LEGACY_ERROR","message":"legacy failure","retryable":true}"#,
+        );
+
+        assert_eq!(error.code, "LEGACY_ERROR");
+        assert_eq!(error.message, "legacy failure");
+        assert!(error.retryable);
     }
 }

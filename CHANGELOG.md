@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5 - 2026-07-22
+
+- Preserve structured bootstrap error codes, messages, and retryability through
+  the MCP adapter instead of replacing them with a generic failure.
+- Keep device-auth recovery on the official MCP flow: surface exact errors,
+  retry serially only when safe, and never recommend a direct CLI fallback.
+
 ## 0.1.4 - 2026-07-21
 
 - Start first-use onboarding from any natural Loomex request without requiring

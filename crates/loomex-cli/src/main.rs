@@ -9456,10 +9456,25 @@ fn error_json_envelope(message: &str) -> String {
         "error": {
             "code": error_code_from_message(message),
             "message": message.split_once(':').map(|(_, text)| text.trim()).unwrap_or(message),
+            "retryable": error_is_retryable(message),
         },
         "exitCode": exit_code_for_error(message)
     })
     .to_string()
+}
+
+fn error_is_retryable(message: &str) -> bool {
+    match error_code_from_message(message) {
+        // MANAGEMENT_HTTP_FAILED is produced only when sending the request fails
+        // before an HTTP response is available. Explicit transient status codes are
+        // the only response failures classified here. Everything else remains
+        // non-retryable so authentication and configuration failures cannot loop.
+        "MANAGEMENT_HTTP_FAILED" => true,
+        "MANAGEMENT_HTTP_STATUS" => [408, 425, 429, 500, 502, 503, 504]
+            .iter()
+            .any(|status| message.contains(&format!("HTTP {status}"))),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -11988,7 +12003,29 @@ mod tests {
         assert_eq!(10, exit_code_for_error(error));
         assert_eq!("loomex.cli.error/v1", envelope["schemaVersion"]);
         assert_eq!("AUTH_TOKEN_EXPIRED", envelope["error"]["code"]);
+        assert_eq!(false, envelope["error"]["retryable"]);
         assert_eq!(10, envelope["exitCode"]);
+    }
+
+    #[test]
+    fn json_error_schema_marks_only_reliable_management_failures_retryable() {
+        for error in [
+            "MANAGEMENT_HTTP_FAILED: connection refused",
+            "MANAGEMENT_HTTP_STATUS: management API returned HTTP 429",
+            "MANAGEMENT_HTTP_STATUS: management API returned HTTP 503",
+        ] {
+            let envelope: Value = serde_json::from_str(&error_json_envelope(error)).unwrap();
+            assert_eq!(true, envelope["error"]["retryable"], "{error}");
+        }
+
+        for error in [
+            "MANAGEMENT_HTTP_STATUS: management API returned HTTP 400",
+            "MANAGEMENT_AUTH_FAILED: token expired",
+            "AUTH_DEVICE_FLOW_EXPIRED: start authentication again",
+        ] {
+            let envelope: Value = serde_json::from_str(&error_json_envelope(error)).unwrap();
+            assert_eq!(false, envelope["error"]["retryable"], "{error}");
+        }
     }
 
     #[test]
