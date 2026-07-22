@@ -8,6 +8,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{self, Command},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -57,6 +58,7 @@ const DEFAULT_DEVICE_LOGIN_TIMEOUT_SECONDS: u64 = 600;
 const MANAGEMENT_TOKEN_CLOCK_SKEW_SECONDS: u64 = 300;
 const DEFAULT_FOLLOW_POLL_INTERVAL_MS: u64 = 500;
 const DEFAULT_FOLLOW_MAX_POLLS: usize = 1_200;
+static NEXT_BINDING_CREATE_ATTEMPT: AtomicU64 = AtomicU64::new(1);
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -898,7 +900,7 @@ fn bootstrap_cli_runner_for_project<C: ManagementApiClient, S: CredentialStore +
     config
         .set_key(
             &format!("profiles.{profile}.bindingId"),
-            exchange.binding_id.unwrap_or(runner_id),
+            exchange.binding_id.unwrap_or_default(),
         )
         .map_err(format_core_error)?;
     config
@@ -1750,6 +1752,25 @@ fn idempotency_key(prefix: &str, value: &str) -> String {
     format!("{prefix}:{}", stable_fingerprint(value))
 }
 
+fn binding_create_idempotency_key(
+    project_id: &str,
+    runner_id: &str,
+    workspace_path: &str,
+) -> String {
+    let epoch_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let attempt = NEXT_BINDING_CREATE_ATTEMPT.fetch_add(1, Ordering::Relaxed);
+    idempotency_key(
+        "plugin-binding-create",
+        &format!(
+            "{project_id}\u{1f}{runner_id}\u{1f}{workspace_path}\u{1f}{}\u{1f}{epoch_nanos}\u{1f}{attempt}",
+            process::id()
+        ),
+    )
+}
+
 fn run_runner(args: &[String], options: &GlobalOptions) -> Result<String, String> {
     if args.is_empty() || is_help(&args[0]) {
         return Ok(RUNNER_HELP.to_string());
@@ -2212,71 +2233,63 @@ fn create_plugin_binding_with<C: ManagementApiClient, S: CredentialStore + ?Size
         ));
     }
     let existing_runner_credential = store.load(profile).map_err(format_core_error)?;
-    if let Some(credential) = existing_runner_credential.as_ref() {
-        credential
-            .validate_not_expiring(
-                current_epoch_seconds()?,
-                MANAGEMENT_TOKEN_CLOCK_SKEW_SECONDS,
-            )
-            .map_err(format_core_error)?;
-        validate_runner_credential_compatibility(credential)?;
-        let bindings = client
-            .list_project_runner_bindings(credential, project_id)
-            .map_err(format_core_error)?;
-        if let Some(binding) = bindings.into_iter().find(|binding| {
-            binding.status == "active"
-                && binding.project_id == project_id
-                && binding.local_root_path == workspace.display_path
-        }) {
-            persist_plugin_binding_context(
-                config,
-                config_path,
-                profile,
-                project_id,
-                &project.organization_id,
-                &binding.runner_id,
-                &binding.id,
-                &workspace.display_path,
-            )?;
-            return Ok(json!({
-                "profile": profile,
-                "projectId": project_id,
-                "organizationId": project.organization_id,
-                "runnerId": binding.runner_id,
-                "binding": binding,
-                "workspace": {
-                    "path": workspace.display_path,
-                    "fingerprint": workspace.fingerprint,
-                },
-                "bootstrapped": false,
-                "reused": true,
-            }));
-        }
-    }
+    let existing_authenticated_runner_id =
+        if let Some(credential) = existing_runner_credential.as_ref() {
+            credential
+                .validate_not_expiring(
+                    current_epoch_seconds()?,
+                    MANAGEMENT_TOKEN_CLOCK_SKEW_SECONDS,
+                )
+                .map_err(format_core_error)?;
+            validate_runner_credential_compatibility(credential)?;
+            let runner = client
+                .get_current_runner(credential, &project.organization_id)
+                .map_err(format_core_error)?;
+            let bindings = client
+                .list_project_runner_bindings(credential, project_id)
+                .map_err(format_core_error)?;
+            if let Some(binding) = bindings.into_iter().find(|binding| {
+                binding.status == "active"
+                    && binding.organization_id == project.organization_id
+                    && binding.project_id == project_id
+                    && binding.runner_id == runner.id
+                    && binding.local_root_path == workspace.display_path
+            }) {
+                persist_plugin_binding_context(
+                    config,
+                    config_path,
+                    profile,
+                    project_id,
+                    &project.organization_id,
+                    &binding.runner_id,
+                    &binding.id,
+                    &workspace.display_path,
+                )?;
+                return Ok(json!({
+                    "profile": profile,
+                    "projectId": project_id,
+                    "organizationId": project.organization_id,
+                    "runnerId": binding.runner_id,
+                    "binding": binding,
+                    "workspace": {
+                        "path": workspace.display_path,
+                        "fingerprint": workspace.fingerprint,
+                    },
+                    "bootstrapped": false,
+                    "reused": true,
+                }));
+            }
+            Some(runner.id)
+        } else {
+            None
+        };
 
     let (runner_credential, runner_id, bootstrapped) = if let Some(credential) =
         existing_runner_credential
     {
-        let configured_runner_id = config
-            .profiles
-            .get(profile)
-            .and_then(|state| state.runner_id.clone());
-        let runner_id = if let Some(runner_id) = configured_runner_id {
-            runner_id
-        } else {
-            let status = client
-                .get_runner_self_status(&credential)
-                .map_err(format_core_error)?;
-            status
-                .get("data")
-                .and_then(|value| value.get("runner"))
-                .or_else(|| status.get("runner"))
-                .and_then(|value| value.get("id"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .map(str::to_string)
-                .ok_or_else(|| "RUNNER_SELF_RESPONSE_INVALID: runner.id is required".to_string())?
-        };
+        let runner_id = existing_authenticated_runner_id.ok_or_else(|| {
+            "RUNNER_SELF_RESPONSE_INVALID: authenticated runner.id is required".to_string()
+        })?;
         (credential, runner_id, false)
     } else {
         let exchange = client
@@ -2301,19 +2314,72 @@ fn create_plugin_binding_with<C: ManagementApiClient, S: CredentialStore + ?Size
         store.save(&runner_credential).map_err(format_core_error)?;
         (runner_credential, runner_id, true)
     };
-    let binding = client
-        .create_project_runner_binding(
-            &runner_credential,
-            project_id,
-            &ProjectRunnerBindingCreateRequest {
-                organization_id: project.organization_id.clone(),
-                runner_id: runner_id.clone(),
-                local_root_path: workspace.display_path.clone(),
-                local_root_fingerprint: Some(workspace.fingerprint.clone()),
-            },
-            &idempotency_key("plugin-binding-create", &workspace.display_path),
-        )
-        .map_err(format_core_error)?;
+    let binding_request = ProjectRunnerBindingCreateRequest {
+        organization_id: project.organization_id.clone(),
+        runner_id: runner_id.clone(),
+        local_root_path: workspace.display_path.clone(),
+        local_root_fingerprint: Some(workspace.fingerprint.clone()),
+    };
+    // A binding lifecycle gets a fresh key. Reusing a path-only key after revoke would let the
+    // backend replay the previous active response instead of creating the replacement binding.
+    // Keep this key stable for this single POST/reconciliation attempt, and never retry the POST
+    // after an uncertain outcome.
+    let binding_create_key =
+        binding_create_idempotency_key(project_id, &runner_id, &workspace.display_path);
+    let (binding, reconciled) = match client.create_project_runner_binding(
+        &runner_credential,
+        project_id,
+        &binding_request,
+        &binding_create_key,
+    ) {
+        Ok(binding) => (binding, false),
+        Err(error)
+            if matches!(
+                error.code,
+                "MANAGEMENT_HTTP_FAILED" | "MANAGEMENT_RESPONSE_INVALID"
+            ) =>
+        {
+            let original_error = format_core_error(error);
+            let matches = client
+                .list_project_runner_bindings(&runner_credential, project_id)
+                .map_err(|reconciliation_error| {
+                    format!(
+                        "{original_error}; BINDING_RECONCILIATION_FAILED: {}",
+                        format_core_error(reconciliation_error)
+                    )
+                })?
+                .into_iter()
+                .filter(|binding| {
+                    binding.status == "active"
+                        && binding.organization_id == binding_request.organization_id
+                        && binding.project_id == project_id
+                        && binding.runner_id == binding_request.runner_id
+                        && binding.local_root_path == binding_request.local_root_path
+                })
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [binding] => (binding.clone(), true),
+                [] => return Err(original_error),
+                _ => {
+                    return Err(format!(
+                        "BINDING_RECONCILIATION_AMBIGUOUS: multiple active bindings match the authenticated runner, project, and workspace after an uncertain create outcome; originalError={original_error}"
+                    ))
+                }
+            }
+        }
+        Err(error) => return Err(format_core_error(error)),
+    };
+    if binding.status != "active"
+        || binding.organization_id != binding_request.organization_id
+        || binding.project_id != project_id
+        || binding.runner_id != binding_request.runner_id
+        || binding.local_root_path != binding_request.local_root_path
+    {
+        return Err(
+            "BINDING_RESPONSE_MISMATCH: created binding does not match the authenticated runner, project, and workspace"
+                .to_string(),
+        );
+    }
     persist_plugin_binding_context(
         config,
         config_path,
@@ -2337,6 +2403,7 @@ fn create_plugin_binding_with<C: ManagementApiClient, S: CredentialStore + ?Size
         },
         "bootstrapped": bootstrapped,
         "reused": false,
+        "reconciled": reconciled,
     }))
 }
 
@@ -2655,29 +2722,30 @@ fn plugin_setup_status(options: &GlobalOptions) -> Result<Value, String> {
         .ok()
         .zip(active.as_ref())
         .is_some_and(|(package, runtime)| plugin_runtime_matches_bundle(package, runtime));
-    let service_readiness = if supported
-        && bundled.is_ok()
-        && runtime_matches_bundle
-        && service_registered
-        && !service_active
-    {
-        Some(
-            plugin_service_bootstrap_readiness(options).unwrap_or_else(|error| {
-                json!({
-                    "ready": false,
-                    "available": false,
-                    "error": plugin_structured_error(&error),
-                    "reason": "bootstrap readiness could not be determined",
-                })
-            }),
-        )
-    } else {
-        None
-    };
+    let service_readiness =
+        if supported && bundled.is_ok() && runtime_matches_bundle && service_registered {
+            Some(
+                plugin_service_bootstrap_readiness(options).unwrap_or_else(|error| {
+                    json!({
+                        "ready": false,
+                        "available": false,
+                        "error": plugin_structured_error(&error),
+                        "reason": "bootstrap readiness could not be determined",
+                    })
+                }),
+            )
+        } else {
+            None
+        };
     let readiness_ready = service_readiness
         .as_ref()
         .and_then(|readiness| readiness.get("ready"))
         .and_then(Value::as_bool);
+    let identity_mismatch = service_readiness
+        .as_ref()
+        .and_then(|readiness| readiness.pointer("/identity/matched"))
+        .and_then(Value::as_bool)
+        == Some(false);
     let (setup_required, recommended_next_action, recommendation_reason) =
         plugin_setup_recommendation(
             supported,
@@ -2686,6 +2754,7 @@ fn plugin_setup_status(options: &GlobalOptions) -> Result<Value, String> {
             service_registered,
             service_active,
             readiness_ready,
+            identity_mismatch,
         );
     let bundled_runtime = match bundled.as_ref() {
         Ok(package) => {
@@ -2732,6 +2801,7 @@ fn plugin_setup_recommendation(
     service_registered: bool,
     service_active: bool,
     readiness_ready: Option<bool>,
+    identity_mismatch: bool,
 ) -> (bool, &'static str, &'static str) {
     if !supported {
         (false, "unsupported", "platform_unsupported")
@@ -2741,8 +2811,14 @@ fn plugin_setup_recommendation(
         (true, "setup.plan", "runtime_mismatch")
     } else if !service_registered {
         (true, "setup.plan", "service_not_registered")
+    } else if identity_mismatch {
+        (false, "binding.create", "runner_identity_mismatch")
     } else if service_active {
-        (false, "auth.status", "setup_complete")
+        if readiness_ready == Some(false) {
+            (false, "auth.status", "service_active_context_incomplete")
+        } else {
+            (false, "auth.status", "setup_complete")
+        }
     } else if readiness_ready == Some(true) {
         (true, "setup.plan", "service_ready_but_inactive")
     } else {
@@ -4452,8 +4528,25 @@ fn plugin_service_bootstrap_readiness(options: &GlobalOptions) -> Result<Value, 
     let store = SystemCredentialStore::new(credential_dir());
     let now = current_epoch_seconds()?;
     let runner_credential = store.load(&resolved.profile).map_err(format_core_error)?;
+    let mut client =
+        HttpManagementApiClient::new(&resolved.server_url, resolved.host_header.clone())
+            .map_err(format_core_error)?;
+    Ok(plugin_service_bootstrap_readiness_with(
+        &resolved,
+        runner_credential.as_ref(),
+        now,
+        &mut client,
+    ))
+}
+
+fn plugin_service_bootstrap_readiness_with<C: ManagementApiClient>(
+    resolved: &loomex_core::ResolvedCliSettings,
+    runner_credential: Option<&ManagementCredential>,
+    now: u64,
+    client: &mut C,
+) -> Value {
     let (credential_ready, reauth_reason) =
-        runner_credential_local_readiness(runner_credential.as_ref(), now);
+        runner_credential_local_readiness(runner_credential, now);
     let missing_context = [
         ("organizationId", resolved.organization_id.as_deref()),
         ("projectId", resolved.project_id.as_deref()),
@@ -4473,7 +4566,44 @@ fn plugin_service_bootstrap_readiness(options: &GlobalOptions) -> Result<Value, 
         .workspace_path
         .as_deref()
         .is_some_and(|path| validate_workspace_path(path).is_ok());
-    let ready = credential_ready && missing_context.is_empty() && workspace_ready;
+    let identity = if credential_ready {
+        match (
+            runner_credential,
+            resolved.organization_id.as_deref(),
+            resolved.runner_id.as_deref(),
+        ) {
+            (Some(credential), Some(organization_id), Some(configured_runner_id)) => {
+                match client.get_current_runner(credential, organization_id) {
+                    Ok(runner) => json!({
+                        "checked": true,
+                        "matched": runner.id == configured_runner_id,
+                        "configuredRunnerId": configured_runner_id,
+                        "authenticatedRunnerId": runner.id,
+                    }),
+                    Err(error) => json!({
+                        "checked": true,
+                        "matched": null,
+                        "configuredRunnerId": configured_runner_id,
+                        "authenticatedRunnerId": null,
+                        "error": {"code": error.code, "message": error.message},
+                    }),
+                }
+            }
+            _ => json!({
+                "checked": false,
+                "matched": null,
+                "reason": "runner identity check waits for authentication and runner context",
+            }),
+        }
+    } else {
+        json!({
+            "checked": false,
+            "matched": null,
+            "reason": "runner identity check waits for authentication",
+        })
+    };
+    let identity_ready = identity.get("matched").and_then(Value::as_bool) == Some(true);
+    let ready = credential_ready && missing_context.is_empty() && workspace_ready && identity_ready;
     let reason = if let Some(reason) = reauth_reason {
         reason
     } else if !credential_ready {
@@ -4482,10 +4612,14 @@ fn plugin_service_bootstrap_readiness(options: &GlobalOptions) -> Result<Value, 
         "organization, project, runner, binding, and workspace must be selected"
     } else if !workspace_ready {
         "selected workspace is not currently readable and writable"
+    } else if identity.get("matched").and_then(Value::as_bool) == Some(false) {
+        "authenticated runner does not match configured runnerId; recreate or reuse the exact binding for this runner"
+    } else if !identity_ready {
+        "authenticated runner identity could not be verified"
     } else {
         "bootstrap is complete"
     };
-    Ok(json!({
+    json!({
         "ready": ready,
         "authenticated": credential_ready,
         "reauthRequired": reauth_reason.is_some(),
@@ -4493,8 +4627,9 @@ fn plugin_service_bootstrap_readiness(options: &GlobalOptions) -> Result<Value, 
         "reauthReason": reauth_reason,
         "missingContext": missing_context,
         "workspaceReady": workspace_ready,
+        "identity": identity,
         "reason": reason,
-    }))
+    })
 }
 
 fn plugin_activate_installed_service_after_bootstrap(
@@ -9984,32 +10119,105 @@ mod tests {
     fn setup_recommendation_distinguishes_deferred_from_stopped_service() {
         assert_eq!(
             (false, "auth.status", "continue_authentication_and_binding"),
-            plugin_setup_recommendation(true, true, true, true, false, Some(false))
+            plugin_setup_recommendation(true, true, true, true, false, Some(false), false)
         );
         assert_eq!(
             (true, "setup.plan", "service_ready_but_inactive"),
-            plugin_setup_recommendation(true, true, true, true, false, Some(true))
+            plugin_setup_recommendation(true, true, true, true, false, Some(true), false)
         );
         assert_eq!(
             (false, "auth.status", "setup_complete"),
-            plugin_setup_recommendation(true, true, true, true, true, None)
+            plugin_setup_recommendation(true, true, true, true, true, None, false)
         );
         assert_eq!(
             (true, "setup.plan", "runtime_mismatch"),
-            plugin_setup_recommendation(true, true, false, true, false, None)
+            plugin_setup_recommendation(true, true, false, true, false, None, false)
         );
         assert_eq!(
             (true, "setup.plan", "service_not_registered"),
-            plugin_setup_recommendation(true, true, true, false, false, None)
+            plugin_setup_recommendation(true, true, true, false, false, None, false)
         );
         assert_eq!(
             (false, "package.error", "bundled_package_error"),
-            plugin_setup_recommendation(true, false, false, false, false, None)
+            plugin_setup_recommendation(true, false, false, false, false, None, false)
         );
         assert_eq!(
             (false, "unsupported", "platform_unsupported"),
-            plugin_setup_recommendation(false, true, false, false, false, None)
+            plugin_setup_recommendation(false, true, false, false, false, None, false)
         );
+        assert_eq!(
+            (false, "binding.create", "runner_identity_mismatch"),
+            plugin_setup_recommendation(true, true, true, true, true, Some(false), true)
+        );
+    }
+
+    #[test]
+    fn setup_readiness_rejects_complete_profile_with_authenticated_runner_mismatch() {
+        let workspace = temp_workspace_path("setup-runner-identity-mismatch");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut config = CliConfig::default();
+        for (key, value) in [
+            ("organizationId", "org_123"),
+            ("projectId", "prj_123"),
+            ("runnerId", "runner-configured"),
+            ("bindingId", "binding-configured"),
+        ] {
+            config
+                .set_key(&format!("profiles.default.{key}"), value.to_string())
+                .unwrap();
+        }
+        config
+            .set_key(
+                "profiles.default.workspacePath",
+                workspace.to_string_lossy().to_string(),
+            )
+            .unwrap();
+        let resolved = config
+            .resolve(CliConfigOverrides::default(), |_| None)
+            .unwrap();
+        let credential = ManagementCredential::from_runner_token_response(
+            "default",
+            "org_123",
+            AuthTokenResponse {
+                access_token: "runner.jwt".to_string(),
+                refresh_token: None,
+                token_type: "Bearer".to_string(),
+                expires_at: "9999-12-31T23:59:59Z".to_string(),
+            },
+            CredentialStorageBackend::LocalFileFallback,
+        )
+        .unwrap();
+        let mut client = FakeManagementClient {
+            runner: Some(Runner {
+                id: "runner-authenticated".to_string(),
+                organization_id: "org_123".to_string(),
+                status: "online".to_string(),
+                runner_version: env!("CARGO_PKG_VERSION").to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                capabilities: default_runner_capabilities(),
+            }),
+            ..Default::default()
+        };
+
+        let readiness =
+            plugin_service_bootstrap_readiness_with(&resolved, Some(&credential), 0, &mut client);
+
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(readiness["identity"]["checked"], true);
+        assert_eq!(readiness["identity"]["matched"], false);
+        assert_eq!(
+            readiness["identity"]["configuredRunnerId"],
+            "runner-configured"
+        );
+        assert_eq!(
+            readiness["identity"]["authenticatedRunnerId"],
+            "runner-authenticated"
+        );
+        assert_eq!(
+            plugin_setup_recommendation(true, true, true, true, true, Some(false), true),
+            (false, "binding.create", "runner_identity_mismatch")
+        );
+        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]
@@ -12053,6 +12261,37 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_doctor_rejects_configured_runner_identity_mismatch() {
+        let mut config = CliConfig::default();
+        for (key, value) in [
+            ("organizationId", "org_123"),
+            ("projectId", "prj_123"),
+            ("runnerId", "runner-configured"),
+            ("bindingId", "binding_123"),
+        ] {
+            config
+                .set_key(&format!("profiles.default.{key}"), value.to_string())
+                .unwrap();
+        }
+        let resolved = config
+            .resolve(CliConfigOverrides::default(), |_| None)
+            .unwrap();
+        let credential = credential("default", "org_123");
+        let mut client = FakeManagementClient {
+            runner_self_status: Some(json!({
+                "runner": {"id": "runner-authenticated", "status": "online"},
+                "tokenScopes": ["runner.read", "runner.jobs"],
+            })),
+            ..Default::default()
+        };
+
+        let check = runner_control_transport_doctor_check(&resolved, &credential, &mut client);
+
+        assert_eq!(check.status, "failed");
+        assert!(check.message.contains("RUNNER_IDENTITY_MISMATCH"));
+    }
+
+    #[test]
     fn doctor_json_runner_control_failure_maps_to_nonzero_exit_without_losing_schema() {
         let checks = vec![
             DoctorCheck::ok("config", "ok"),
@@ -12414,6 +12653,12 @@ mod tests {
         .unwrap();
         store.save(&user_credential).unwrap();
         let mut config = CliConfig::default();
+        config
+            .set_key("profiles.default.organizationId", "org_123".to_string())
+            .unwrap();
+        config
+            .set_key("profiles.default.projectId", "prj_123".to_string())
+            .unwrap();
         let mut client = FakeManagementClient::default();
 
         bootstrap_cli_runner_for_project(
@@ -12437,6 +12682,18 @@ mod tests {
             Some("runner_123".to_string()),
             config.profiles["default"].runner_id
         );
+        assert!(config.profiles["default"].binding_id.is_none());
+        let resolved = config
+            .resolve(CliConfigOverrides::default(), |_| None)
+            .unwrap();
+        let readiness =
+            plugin_service_bootstrap_readiness_with(&resolved, Some(&runner), 0, &mut client);
+        assert_eq!(readiness["ready"], false);
+        assert!(readiness["missingContext"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "bindingId"));
         let _ = fs::remove_file(config_path);
         let _ = fs::remove_dir_all(credential_root);
     }
@@ -12931,6 +13188,210 @@ mod tests {
             saved_config.profiles["default"].binding_id.as_deref(),
             Some("binding_123")
         );
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_dir_all(&credential_root);
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn plugin_binding_reconciles_decode_failure_after_server_created_binding_once() {
+        let config_path = temp_config_path("plugin-binding-reconcile");
+        let credential_root = temp_credential_dir("plugin-binding-reconcile");
+        let workspace = temp_workspace_path("plugin-binding-reconcile");
+        fs::create_dir_all(&workspace).unwrap();
+        let store = LocalCredentialStore::new(credential_root.clone());
+        let user_credential = ManagementCredential::from_user_token_response(
+            "default.user",
+            "org_123",
+            token("user.jwt"),
+            CredentialStorageBackend::LocalFileFallback,
+        )
+        .unwrap();
+        store.save(&user_credential).unwrap();
+        let mut config = CliConfig::default();
+        let mut client = FakeManagementClient {
+            project: Some(Project {
+                id: "prj_123".to_string(),
+                organization_id: "org_123".to_string(),
+                name: "Demo".to_string(),
+                status: "active".to_string(),
+            }),
+            binding_create_error_after_insert: Some(loomex_core::CoreError::new(
+                "MANAGEMENT_RESPONSE_INVALID",
+                "response body could not be decoded",
+            )),
+            ..Default::default()
+        };
+
+        let result = create_plugin_binding_with(
+            "prj_123",
+            &workspace.to_string_lossy(),
+            "default",
+            &mut config,
+            &config_path,
+            &store,
+            &user_credential,
+            &mut client,
+        )
+        .unwrap();
+
+        assert_eq!(client.binding_create_count, 1);
+        assert_eq!(client.bindings.len(), 1);
+        assert_eq!(result["binding"]["id"], "binding_123");
+        assert_eq!(result["reconciled"], true);
+        assert_eq!(
+            config.profiles["default"].binding_id.as_deref(),
+            Some("binding_123")
+        );
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_dir_all(&credential_root);
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn plugin_binding_uses_authenticated_runner_and_does_not_reuse_foreign_binding() {
+        let config_path = temp_config_path("plugin-binding-authenticated-runner");
+        let credential_root = temp_credential_dir("plugin-binding-authenticated-runner");
+        let workspace = temp_workspace_path("plugin-binding-authenticated-runner");
+        fs::create_dir_all(&workspace).unwrap();
+        let canonical_workspace = workspace.canonicalize().unwrap().display().to_string();
+        let store = LocalCredentialStore::new(credential_root.clone());
+        let user_credential = ManagementCredential::from_user_token_response(
+            "default.user",
+            "org_123",
+            token("user.jwt"),
+            CredentialStorageBackend::LocalFileFallback,
+        )
+        .unwrap();
+        let runner_credential = ManagementCredential::from_runner_token_response(
+            "default",
+            "org_123",
+            AuthTokenResponse {
+                access_token: "runner.jwt".to_string(),
+                refresh_token: None,
+                token_type: "Bearer".to_string(),
+                expires_at: "9999-12-31T23:59:59Z".to_string(),
+            },
+            CredentialStorageBackend::LocalFileFallback,
+        )
+        .unwrap();
+        store.save(&user_credential).unwrap();
+        store.save(&runner_credential).unwrap();
+        let mut config = CliConfig::default();
+        config
+            .set_key("profiles.default.runnerId", "runner-stale".to_string())
+            .unwrap();
+        let mut client = FakeManagementClient {
+            project: Some(Project {
+                id: "prj_123".to_string(),
+                organization_id: "org_123".to_string(),
+                name: "Demo".to_string(),
+                status: "active".to_string(),
+            }),
+            runner: Some(Runner {
+                id: "runner_123".to_string(),
+                organization_id: "org_123".to_string(),
+                status: "online".to_string(),
+                runner_version: env!("CARGO_PKG_VERSION").to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                capabilities: default_runner_capabilities(),
+            }),
+            bindings: vec![ManagementProjectRunnerBinding {
+                id: "binding-foreign".to_string(),
+                organization_id: "org_123".to_string(),
+                project_id: "prj_123".to_string(),
+                runner_id: "runner-stale".to_string(),
+                local_root_path: canonical_workspace,
+                status: "active".to_string(),
+                local_root_fingerprint: None,
+            }],
+            ..Default::default()
+        };
+
+        let result = create_plugin_binding_with(
+            "prj_123",
+            &workspace.to_string_lossy(),
+            "default",
+            &mut config,
+            &config_path,
+            &store,
+            &user_credential,
+            &mut client,
+        )
+        .unwrap();
+
+        assert_eq!(client.binding_create_count, 1);
+        assert_eq!(result["reused"], false);
+        assert_eq!(result["runnerId"], "runner_123");
+        assert_eq!(
+            client.last_binding_request.as_ref().unwrap().runner_id,
+            "runner_123"
+        );
+        assert_eq!(
+            config.profiles["default"].runner_id.as_deref(),
+            Some("runner_123")
+        );
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_dir_all(&credential_root);
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn plugin_binding_revoke_and_recreate_uses_a_fresh_lifecycle_idempotency_key() {
+        let config_path = temp_config_path("plugin-binding-recreate");
+        let credential_root = temp_credential_dir("plugin-binding-recreate");
+        let workspace = temp_workspace_path("plugin-binding-recreate");
+        fs::create_dir_all(&workspace).unwrap();
+        let store = LocalCredentialStore::new(credential_root.clone());
+        let user_credential = ManagementCredential::from_user_token_response(
+            "default.user",
+            "org_123",
+            token("user.jwt"),
+            CredentialStorageBackend::LocalFileFallback,
+        )
+        .unwrap();
+        store.save(&user_credential).unwrap();
+        let mut config = CliConfig::default();
+        let mut client = FakeManagementClient {
+            project: Some(Project {
+                id: "prj_123".to_string(),
+                organization_id: "org_123".to_string(),
+                name: "Demo".to_string(),
+                status: "active".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let first = create_plugin_binding_with(
+            "prj_123",
+            &workspace.to_string_lossy(),
+            "default",
+            &mut config,
+            &config_path,
+            &store,
+            &user_credential,
+            &mut client,
+        )
+        .unwrap();
+        client.bindings[0].status = "revoked".to_string();
+        let second = create_plugin_binding_with(
+            "prj_123",
+            &workspace.to_string_lossy(),
+            "default",
+            &mut config,
+            &config_path,
+            &store,
+            &user_credential,
+            &mut client,
+        )
+        .unwrap();
+
+        assert_eq!(client.binding_create_count, 2);
+        assert_eq!(client.binding_create_keys.len(), 2);
+        assert_ne!(client.binding_create_keys[0], client.binding_create_keys[1]);
+        assert_eq!(first["binding"]["id"], "binding_123");
+        assert_eq!(second["binding"]["id"], "binding_2");
+        assert_eq!(second["reused"], false);
         let _ = fs::remove_file(&config_path);
         let _ = fs::remove_dir_all(&credential_root);
         let _ = fs::remove_dir_all(&workspace);
@@ -14461,6 +14922,9 @@ mod tests {
         bootstrap_call_count: usize,
         upsert_call_count: usize,
         binding_create_count: usize,
+        binding_create_keys: Vec<String>,
+        binding_create_replays: std::collections::HashMap<String, ManagementProjectRunnerBinding>,
+        binding_create_error_after_insert: Option<loomex_core::CoreError>,
         last_workflow_request: Option<WorkflowRunStartRequest>,
         last_human_request_id: Option<String>,
         last_human_resolution: Option<Value>,
@@ -14659,16 +15123,24 @@ mod tests {
             credential: &ManagementCredential,
             project_id: &str,
             request: &ProjectRunnerBindingCreateRequest,
-            _idempotency_key: &str,
+            idempotency_key: &str,
         ) -> loomex_core::CoreResult<ManagementProjectRunnerBinding> {
             self.binding_create_count += 1;
+            self.binding_create_keys.push(idempotency_key.to_string());
             self.last_binding_access_token = Some(credential.access_token.clone());
             self.last_binding_request = Some(request.clone());
+            if let Some(binding) = self.binding_create_replays.get(idempotency_key) {
+                return Ok(binding.clone());
+            }
             let binding = self
                 .binding
                 .clone()
                 .unwrap_or_else(|| ManagementProjectRunnerBinding {
-                    id: "binding_123".to_string(),
+                    id: if self.binding_create_count == 1 {
+                        "binding_123".to_string()
+                    } else {
+                        format!("binding_{}", self.binding_create_count)
+                    },
                     organization_id: request.organization_id.clone(),
                     project_id: project_id.to_string(),
                     runner_id: request.runner_id.clone(),
@@ -14676,8 +15148,13 @@ mod tests {
                     status: "active".to_string(),
                     local_root_fingerprint: request.local_root_fingerprint.clone(),
                 });
+            self.binding_create_replays
+                .insert(idempotency_key.to_string(), binding.clone());
             if !self.bindings.iter().any(|item| item.id == binding.id) {
                 self.bindings.push(binding.clone());
+            }
+            if let Some(error) = self.binding_create_error_after_insert.take() {
+                return Err(error);
             }
             Ok(binding)
         }

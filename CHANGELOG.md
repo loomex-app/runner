@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.8 - 2026-07-23
+
+- Recover retryable Runner management disconnects by re-reading durable run
+  state before recommending any local service restart, and avoid claiming a
+  human-input resume succeeded when the workflow outcome is still unknown.
+- Reconcile local Runner and workspace-binding identity with the authenticated
+  backend identity, including safe read-after-write recovery for ambiguous
+  binding responses and lifecycle-fresh idempotency keys after revoke/recreate.
+- Report identity drift through setup and doctor diagnostics so Codex can offer
+  an explicit, non-destructive binding repair instead of silently rebinding.
+
 ## 0.1.7 - 2026-07-22
 
 - Reset the Runner control reconnect backoff after the first successful lease

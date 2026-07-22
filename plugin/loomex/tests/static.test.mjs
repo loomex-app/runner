@@ -81,6 +81,41 @@ test("references use the implemented public MCP argument contract", async () => 
   assert.match(runner, /does not accept time-range or run-ID filters/);
 });
 
+test("retryable management failures recover state before considering restart", async () => {
+  const skill = await readFile(path.join(root, "skills", "loomex", "SKILL.md"), "utf8");
+  const runs = await readFile(
+    path.join(root, "skills", "loomex", "references", "workflows-and-runs.md"),
+    "utf8",
+  );
+  const runner = await readFile(
+    path.join(root, "skills", "loomex", "references", "runner-operations.md"),
+    "utf8",
+  );
+  const human = await readFile(
+    path.join(root, "skills", "loomex", "references", "human-and-approvals.md"),
+    "utf8",
+  );
+  const architecture = await readFile(
+    path.join(root, "skills", "loomex", "references", "architecture.md"),
+    "utf8",
+  );
+
+  assert.match(skill, /retryable management or wait transport failures as unknown state/);
+  assert.match(skill, /`loomex_run_get` using the authoritative execution ID/);
+  assert.match(skill, /Do not recommend restarting the Runner unless\s+`loomex_runner_status` or `loomex_runner_doctor`/);
+  assert.match(runs, /`MANAGEMENT_HTTP_FAILED`[\s\S]*latest run state is unknown/);
+  assert.match(runs, /small bounded\s+number of status attempts/);
+  assert.match(runs, /Do not restart the Runner merely because a management request failed three\s+times/);
+  assert.match(runs, /dispatch timeout is a terminal backend result/);
+  assert.match(runs, /Restarting the Runner cannot continue that same terminal execution/);
+  assert.match(runner, /Recommend restart only\s+when status or doctor identifies an unhealthy local service/);
+  assert.match(runner, /`RUNNER_IDENTITY_MISMATCH`/);
+  assert.match(runner, /Never silently re-register, rebind, delete\s+credentials, or replace identity state/);
+  assert.match(human, /`resolved` response confirms the human request, not the\s+workflow's later state/);
+  assert.match(human, /follow the `loomex_run_get` recovery flow/);
+  assert.match(architecture, /does not restart a healthy Runner to force a\s+reconnect/);
+});
+
 test("source package contains no fake bundled executable", async () => {
   await assert.rejects(readdir(path.join(root, "bin")), /ENOENT/);
   const template = JSON.parse(
@@ -126,7 +161,7 @@ test("natural Loomex requests automatically enter first-use onboarding", async (
   const readme = await readFile(path.join(root, "README.md"), "utf8");
   const installer = await readFile(path.join(root, "scripts", "install-codex.sh"), "utf8");
 
-  assert.equal(manifest.version, "0.1.7");
+  assert.equal(manifest.version, "0.1.8");
   assert.match(manifest.interface.longDescription, /automatically checks first-use readiness/);
   assert.match(manifest.interface.defaultPrompt.join("\n"), /setup should start automatically/);
   assert.match(skill, /For every natural-language Loomex request/);

@@ -8,6 +8,21 @@ Use `loomex_runner_doctor` for read-only diagnosis; optional `verbose` requests
 more detail. Summarize failed checks and recommended actions; do not turn a
 diagnosis request into repair or restart.
 
+A retryable `MANAGEMENT_HTTP_FAILED` from run follow-up is not by itself proof
+that the service is unhealthy. Check `loomex_runner_status`; if that result is
+unavailable or ambiguous, check `loomex_runner_doctor`. When the service is
+active and healthy, do not recommend `loomex_runner_control restart`; return to
+the execution ID with `loomex_run_get` and bounded waits. Recommend restart only
+when status or doctor identifies an unhealthy local service.
+
+If doctor reports `RUNNER_IDENTITY_MISMATCH`, show the expected and observed
+identities when the tool safely returns them and explain which authenticated
+profile and binding are selected. Never silently re-register, rebind, delete
+credentials, or replace identity state. Use read-only setup, auth, binding, and
+doctor results to determine whether the mismatch is stale local state or the
+wrong selected scope; any repair or selection change follows its normal preview
+and explicit-confirmation flow.
+
 `loomex_runner_control` changes the durable service. Before the selected `action`
 of `start`, `stop`, or `restart`, show active local executions and expected
 impact. After explicit confirmation, pass `confirm: true`. Never stop the Runner
