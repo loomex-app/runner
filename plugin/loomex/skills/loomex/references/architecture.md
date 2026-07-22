@@ -27,3 +27,8 @@ plugin.
 The Runner owns device identity, credentials, reconnect and replay, heartbeat,
 cancellation, path containment, symlink defense, policy, and audit. The plugin
 must not duplicate or bypass these controls.
+
+A management transport error leaves the remote execution state unknown. The
+plugin re-reads that state by execution ID; it does not infer durability or
+cancellation from the error and does not restart a healthy Runner to force a
+reconnect.

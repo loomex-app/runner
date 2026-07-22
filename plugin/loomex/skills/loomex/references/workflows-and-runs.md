@@ -36,9 +36,35 @@ Provide short progress updates for long runs. If the connection or Codex
 restarts, call `loomex_run_get` with the run ID, then resume waiting from the
 returned state.
 
+`MANAGEMENT_HTTP_FAILED` and other retryable wait/transport failures mean that
+the latest run state is unknown. They do not prove that the durable run was
+preserved, cancelled, or failed. Keep the authoritative execution ID and:
+
+1. call `loomex_run_get` for that execution;
+2. if the request still has a retryable transport failure, make a small bounded
+   number of status attempts with short pauses rather than an unbounded loop;
+3. when a non-terminal state is returned, resume bounded `loomex_run_wait`
+   calls from the returned sequence and refresh the human and approval inboxes;
+4. when a terminal state is returned, report that exact server state and stop
+   waiting.
+
+Do not restart the Runner merely because a management request failed three
+times. First call `loomex_runner_status`, and use `loomex_runner_doctor` when
+status is inconclusive. Recommend a restart only when those authoritative
+checks show the local service is unhealthy. A healthy Runner owns reconnect and
+replay and should be allowed to recover without a disruptive lifecycle change.
+Runner control still requires the impact preview and confirmation described in
+[runner-operations.md](runner-operations.md).
+
 Terminal states are `succeeded`, `failed`, and `cancelled`; use the actual
 structured state returned by the server. Waiting for human input or approval is
 non-terminal. Route those states through the corresponding inbox tools.
+
+A dispatch timeout is a terminal backend result when `loomex_run_get` reports
+the run as `failed`: the job was not leased within the dispatch grace period.
+Restarting the Runner cannot continue that same terminal execution; a new run
+requires a new user request and idempotency key. Do not confuse a retryable
+management transport failure with this authoritative terminal result.
 
 `loomex_run_list` currently requires `workflowId`; it cannot enumerate every run
 in a project. When the user lacks both execution ID and workflow ID, resolve the
