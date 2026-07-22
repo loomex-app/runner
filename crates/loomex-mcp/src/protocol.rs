@@ -73,7 +73,7 @@ impl Server {
             "protocolVersion": protocol_version,
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "loomex", "title": "Loomex Local Workflow Runner", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": "For every Loomex request, first call loomex_setup_status and follow recommendedNextAction (or infer setup.plan from legacy runtime/service fields). If setup is needed, immediately call read-only loomex_setup_plan without a preliminary question. Explain that a verified Runner runtime is bundled but its durable per-user service needs setup. Ask approval only before loomex_setup_apply. Then complete auth, scope, and workspace binding and resume the original request. Never require a special setup phrase."
+            "instructions": "For every Loomex request, first call loomex_setup_status and follow recommendedNextAction. For setup.plan, immediately call read-only loomex_setup_plan. Ask approval only before loomex_setup_apply. For binding.create after an identity mismatch, show the exact repair and ask before loomex_binding_create; never rewrite identity silently. Complete auth, scope, and binding, then resume the original request. Never require a special setup phrase."
         }))
     }
 

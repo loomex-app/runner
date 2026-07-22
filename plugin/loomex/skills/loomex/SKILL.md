@@ -37,19 +37,24 @@ Read every reference needed for the user's request before calling its tools.
    verified runtime is already bundled with the plugin, but its durable
    per-user service is not set up yet. Show the concrete plan; ask for approval
    only before `loomex_setup_apply`.
-3. When setup is complete, continue through authentication, required
+3. When the next action is `binding.create` because the configured Runner does
+   not match the authenticated Runner, do not mutate local state silently. Read
+   the selected scope and bindings, show the exact project and workspace repair,
+   obtain confirmation, then call `loomex_binding_create`; its exact-binding
+   reconciliation is safe after an uncertain prior create response.
+4. When setup is complete, continue through authentication, required
    organization/project scope, and workspace binding, then resume the user's
    original request in the same conversation. A registered service that is
    deferred or inactive pending auth/binding is not a reason to repair setup.
-4. Reuse the selected organization, project, and existing binding when they
+5. Reuse the selected organization, project, and existing binding when they
    unambiguously match the current workspace. Never silently widen a binding.
-5. Before running, use `loomex_workflow_show` to confirm inputs and local
+6. Before running, use `loomex_workflow_show` to confirm inputs and local
    capabilities when the workflow or parameters are ambiguous.
-6. Treat the ID returned by `loomex_workflow_run` as authoritative. Follow it
+7. Treat the ID returned by `loomex_workflow_run` as authoritative. Follow it
    with `loomex_run_wait`; do not run shell commands to imitate its nodes.
-7. When a wait returns a human request or approval, present the exact prompt,
+8. When a wait returns a human request or approval, present the exact prompt,
    choices, consequences, and run context. Submit only the user's decision.
-8. A closed Codex app cannot surface new prompts. The durable Runner keeps the
+9. A closed Codex app cannot surface new prompts. The durable Runner keeps the
    run alive and the backend retains pending work. On reconnect, query the run
    and pending inboxes, and explain this boundary honestly.
 9. Treat retryable management or wait transport failures as unknown state, not

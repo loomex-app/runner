@@ -665,7 +665,13 @@ fn output_data_schema(tool_name: &str) -> Value {
                 ("setupRequired", boolean()),
                 (
                     "recommendedNextAction",
-                    enum_string(&["setup.plan", "auth.status", "package.error", "unsupported"]),
+                    enum_string(&[
+                        "setup.plan",
+                        "auth.status",
+                        "binding.create",
+                        "package.error",
+                        "unsupported",
+                    ]),
                 ),
                 ("recommendationReason", identifier()),
                 ("bundledRuntime", evolvable_object(&[], &[])),
@@ -1378,6 +1384,15 @@ mod tests {
             "installed":false,"runtime":null,"runtimeRoot":"/runtime",
             "runtimeMatchesBundle":false,"serviceRegistered":false,"serviceActive":false
         });
+        validate_output(
+            &definition.output_schema,
+            &envelope(definition.name, additive.clone()),
+        )
+        .unwrap();
+
+        additive["setupRequired"] = json!(false);
+        additive["recommendedNextAction"] = json!("binding.create");
+        additive["recommendationReason"] = json!("runner_identity_mismatch");
         validate_output(
             &definition.output_schema,
             &envelope(definition.name, additive.clone()),
