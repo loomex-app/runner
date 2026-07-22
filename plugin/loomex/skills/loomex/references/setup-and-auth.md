@@ -51,6 +51,12 @@ If `recommendedNextAction` is `auth.status`, do not create another setup plan,
 even when the registered service is inactive or deferred while authentication
 or binding is incomplete. Continue with authentication, organization/project
 scope, and workspace binding below, then resume the original Loomex request.
+If the action is `binding.create` with reason `runner_identity_mismatch`, treat
+it as an explicit binding repair, not a setup reinstall or automatic identity
+rewrite. Read the current organization, project, and bindings; show the exact
+workspace and authenticated-Runner repair; obtain confirmation; then call
+`loomex_binding_create`. Do not restart the Runner merely to conceal the
+identity mismatch.
 If the action is `unsupported`, report the structured reason and do not attempt
 setup. If it is `package.error`, report `bundledRuntime.error`; do not misreport
 a malformed or unavailable package as an unsupported platform.

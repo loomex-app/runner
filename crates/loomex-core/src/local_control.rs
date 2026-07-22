@@ -470,11 +470,34 @@ impl<C: ManagementApiClient + Clone> LocalControlDispatcher<C> {
             let backend =
                 self.with_client(|client| client.get_runner_self_status(&self.credential));
             match backend {
-                Ok(_) => checks.push(doctor_check(
-                    "backend",
-                    "ok",
-                    "authenticated runner-control request succeeded",
-                )),
+                Ok(status) => {
+                    let authenticated_runner_id = status
+                        .get("data")
+                        .and_then(|value| value.get("runner"))
+                        .or_else(|| status.get("runner"))
+                        .and_then(|runner| runner.get("id"))
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty());
+                    match (self.runner_id.as_deref(), authenticated_runner_id) {
+                        (Some(configured), Some(authenticated)) if configured != authenticated => {
+                            checks.push(doctor_check(
+                                "backend",
+                                "failed",
+                                "RUNNER_IDENTITY_MISMATCH: authenticated runner does not match configured runnerId",
+                            ));
+                        }
+                        (_, None) => checks.push(doctor_check(
+                            "backend",
+                            "failed",
+                            "RUNNER_SELF_RESPONSE_INVALID: authenticated runner.id is missing",
+                        )),
+                        _ => checks.push(doctor_check(
+                            "backend",
+                            "ok",
+                            "authenticated runner-control request succeeded",
+                        )),
+                    }
+                }
                 Err(error) => checks.push(doctor_check(
                     "backend",
                     "failed",
@@ -1391,6 +1414,49 @@ mod tests {
             .unwrap();
         assert_eq!(workspace_check["status"], "ok");
         let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn daemon_doctor_rejects_configured_runner_identity_mismatch() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer).unwrap();
+            let body = r#"{"data":{"runner":{"id":"runner-authenticated","status":"online"},"tokenScopes":["runner.read","runner.jobs"]}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let client =
+            crate::HttpManagementApiClient::new(format!("http://{address}"), None).unwrap();
+        let dispatcher = LocalControlDispatcher::new(client, test_credential()).with_context(
+            Some("project-test".to_string()),
+            Some("runner-configured".to_string()),
+            Some("binding-test".to_string()),
+            Some(std::env::temp_dir().display().to_string()),
+            None,
+        );
+
+        let result = dispatcher.dispatch("doctor", &json!({})).unwrap();
+
+        let backend = result["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "backend")
+            .unwrap();
+        assert_eq!(result["status"], "failed");
+        assert_eq!(backend["status"], "failed");
+        assert!(backend["message"]
+            .as_str()
+            .unwrap()
+            .contains("RUNNER_IDENTITY_MISMATCH"));
+        server.join().unwrap();
     }
 
     #[test]

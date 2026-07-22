@@ -1532,7 +1532,7 @@ impl MacApp {
         config.set_key(&format!("profiles.{profile}.runnerId"), runner_id.clone())?;
         config.set_key(
             &format!("profiles.{profile}.bindingId"),
-            exchange.binding_id.unwrap_or(runner_id),
+            exchange.binding_id.unwrap_or_default(),
         )?;
         config.set_key(&format!("profiles.{profile}.workspacePath"), String::new())?;
         config.save(&self.paths.config_path)?;
