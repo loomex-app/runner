@@ -19,6 +19,11 @@ be used for a safely retried submission. `response` may be a scalar, object, or
 other value allowed by the request schema; do not wrap it in the Runner's
 internal `payload` field. If the request is already answered or expired, report
 that state and refresh the run rather than sending to another pending request.
+An authoritative `resolved` response confirms the human request, not the
+workflow's later state. If the subsequent wait has a retryable management
+failure, keep the execution ID and follow the `loomex_run_get` recovery flow in
+[workflows-and-runs.md](workflows-and-runs.md); do not infer that the run was
+preserved or recommend a Runner restart from that transport error alone.
 
 ## Approvals
 

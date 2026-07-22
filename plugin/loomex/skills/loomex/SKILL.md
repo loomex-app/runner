@@ -52,6 +52,12 @@ Read every reference needed for the user's request before calling its tools.
 8. A closed Codex app cannot surface new prompts. The durable Runner keeps the
    run alive and the backend retains pending work. On reconnect, query the run
    and pending inboxes, and explain this boundary honestly.
+9. Treat retryable management or wait transport failures as unknown state, not
+   as evidence that the run survived, failed, or was cancelled. Recover with
+   `loomex_run_get` using the authoritative execution ID, then use bounded
+   `loomex_run_wait` calls. Do not recommend restarting the Runner unless
+   `loomex_runner_status` or `loomex_runner_doctor` shows that the local service
+   is unhealthy; a healthy service must be allowed to reconnect by itself.
 
 ## Tool inventory
 
