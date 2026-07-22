@@ -7,6 +7,7 @@ on:
       - ".github/scripts/**"
       - "codex_plugin_*"
       - "plugin/**"
+      - "scripts/codex_mcp_discovery_smoke.py"
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/loomex-core/**"
@@ -33,6 +34,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CODEX_VALIDATOR_COMMIT: 1836ae0612052137d0cabaff7807ff8314cee940
+  CODEX_SMOKE_VERSION: "0.144.6"
   MINIMUM_GLIBC: "2.35"
   SIGSTORE_ROOT_COMMIT: a394944ec0ec1dd5e8ba50471e9ded37d88b5daa
   SIGSTORE_ROOT_SHA256: 6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66
@@ -215,8 +217,32 @@ jobs:
             execute=()
           fi
           "${execute[@]}" "$runtime" --help >/dev/null
-          response="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}' | "${execute[@]}" "$mcp")"
-          python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert value["result"]["serverInfo"]["name"] == "loomex"' "$response"
+          mcp_command=(
+            timeout --signal=TERM --kill-after=5s 30s
+            "${execute[@]}" "$mcp"
+          )
+          response="$(
+            printf '%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"progressToken":2,"com.openai/codex":{"source":"tool-discovery"}}}}' \
+              | "${mcp_command[@]}"
+          )"
+          SMOKE_RESPONSE="$response" python3 - <<'PY'
+          import json
+          import os
+
+          responses = [json.loads(line) for line in os.environ["SMOKE_RESPONSE"].splitlines()]
+          by_id = {response.get("id"): response for response in responses}
+          assert set(by_id) == {1, 2}, by_id
+          assert by_id[1]["result"]["serverInfo"]["name"] == "loomex"
+          tools = by_id[2]["result"]["tools"]
+          names = {tool["name"] for tool in tools}
+          assert len(tools) == 30, sorted(names)
+          assert len(names) == 30, "duplicate MCP tool names"
+          required = {"loomex_setup_status", "loomex_workflow_list"}
+          assert required <= names, sorted(required - names)
+          PY
       - name: Enforce pinned glibc symbol ceiling
         if: runner.os == 'Linux'
         shell: bash
@@ -404,6 +430,20 @@ jobs:
           --marketplace-archive "dist/${{ steps.metadata.outputs.marketplace-archive }}"
           --marketplace-provenance "dist/${{ steps.metadata.outputs.marketplace-provenance }}"
           --marketplace-installer "dist/${{ steps.metadata.outputs.marketplace-installer }}"
+      - name: Install pinned Codex CLI for marketplace smoke
+        shell: bash
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/codex-smoke" \
+            --no-audit --no-fund "@openai/codex@$CODEX_SMOKE_VERSION"
+          test "$("$RUNNER_TEMP/codex-smoke/bin/codex" --version)" = \
+            "codex-cli $CODEX_SMOKE_VERSION"
+      - name: Verify assembled marketplace discovery through Codex
+        run: >-
+          python3 scripts/codex_mcp_discovery_smoke.py
+          --codex "$RUNNER_TEMP/codex-smoke/bin/codex"
+          --marketplace-root dist/marketplace
+          --expected-version "${{ steps.metadata.outputs.version }}"
+          --timeout-seconds 60
       - name: Verify archive extraction and executable modes
         shell: bash
         run: |

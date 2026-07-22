@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6 - 2026-07-22
+
+- Accept the MCP protocol's reserved `_meta` parameter on `tools/list` and
+  `tools/call`, restoring Loomex tool discovery and invocation in Codex while
+  continuing to reject unknown request parameters.
+
 ## 0.1.5 - 2026-07-22
 
 - Preserve structured bootstrap error codes, messages, and retryability through
