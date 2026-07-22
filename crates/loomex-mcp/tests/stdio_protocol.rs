@@ -33,6 +33,7 @@ fn subprocess_speaks_clean_json_rpc_and_forwards_to_local_control() {
         assert_eq!(request["protocolVersion"], "loomex.local-control/v1");
         assert_eq!(request["authToken"], "0123456789abcdef0123456789abcdef");
         assert_eq!(request["method"], "status");
+        assert!(request.get("_meta").is_none());
         let response = json!({
             "protocolVersion":"loomex.local-control/v1", "id":request["id"], "ok":true,
             "result":{
@@ -64,10 +65,37 @@ fn subprocess_speaks_clean_json_rpc_and_forwards_to_local_control() {
     writeln!(
         stdin,
         "{}",
-        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
+        json!({
+            "jsonrpc":"2.0",
+            "id":2,
+            "method":"tools/list",
+            "params":{
+                "_meta":{
+                    "progressToken":2,
+                    "com.openai/codex":{"source":"tool-discovery"}
+                }
+            }
+        })
     )
     .unwrap();
-    writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"loomex_runner_status","arguments":{}}})).unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc":"2.0",
+            "id":3,
+            "method":"tools/call",
+            "params":{
+                "name":"loomex_runner_status",
+                "arguments":{},
+                "_meta":{
+                    "progressToken":3,
+                    "com.openai/codex":{"source":"tool-call"}
+                }
+            }
+        })
+    )
+    .unwrap();
     drop(stdin);
 
     let mut stdout = String::new();
