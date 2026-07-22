@@ -422,6 +422,16 @@ else:
         self.assertEqual(len(implemented), 30)
         self.assertEqual(advertised, implemented)
 
+    def test_auth_skill_forbids_direct_cli_fallback_and_obeys_retryability(self) -> None:
+        guidance = (
+            ROOT / "plugin/loomex/skills/loomex/references/setup-and-auth.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("surface its exact structured `code`", guidance)
+        self.assertIn("only when `retryable` is `true`", guidance)
+        self.assertIn("Never recommend or run direct\n`loomex login` as a fallback", guidance)
+        self.assertIn("keep retries serial", guidance)
+
     def test_manifest_advertises_only_supported_product_capabilities(self) -> None:
         manifest = json.loads(
             (ROOT / "plugin/loomex/.codex-plugin/plugin.json").read_text(
@@ -486,7 +496,7 @@ else:
         for unsafe in ("--insecure", "--insecure-ignore-tlog", "xattr", "spctl", "sudo"):
             self.assertNotIn(unsafe, installer)
 
-        rendered = installer.replace("@LOOMEX_RELEASE_VERSION@", "0.1.4")
+        rendered = installer.replace("@LOOMEX_RELEASE_VERSION@", "0.1.5")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             complete = root / "install-codex.sh"
@@ -1132,7 +1142,7 @@ else:
                     "--marketplace-installer",
                     str(temp / "loomex-install-marketplace.sh"),
                     "--version",
-                    "0.1.4",
+                    "0.1.5",
                 ],
                 text=True,
                 capture_output=True,
@@ -1154,7 +1164,7 @@ else:
             shutil.copytree(ROOT / "plugin/loomex", source)
             plugin_json = source / ".codex-plugin/plugin.json"
             plugin = json.loads(plugin_json.read_text())
-            plugin["version"] = "0.1.4+codex.local-20260721-120000"
+            plugin["version"] = "0.1.5+codex.local-20260722-120000"
             plugin_json.write_text(json.dumps(plugin))
             artifacts = temp / "artifacts"
             self.write_artifacts(artifacts)
@@ -1172,7 +1182,7 @@ else:
             self.assertEqual(result.returncode, 0, result.stderr)
             manifest = json.loads((temp / "dist/loomex/packaging/runtime-manifest.json").read_text())
             self.assertEqual(manifest["pluginVersion"], plugin["version"])
-            self.assertEqual(manifest["runtimeVersion"], "0.1.4")
+            self.assertEqual(manifest["runtimeVersion"], "0.1.5")
             self.assertEqual(validate_runtime_integrity(temp / "dist/loomex"), [])
 
 

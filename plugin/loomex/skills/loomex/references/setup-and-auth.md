@@ -68,6 +68,13 @@ login ID and offer to wait again.
 the device authorization and stores the returned credential locally. Do not
 issue concurrent waits for the same login ID.
 
+If `loomex_auth_wait` returns an error, surface its exact structured `code`,
+`message`, and `retryable` fields. Retry `loomex_auth_wait` with the same login
+ID only when `retryable` is `true`, and keep retries serial. When it is `false`,
+stop and report the error and its remediation. Never recommend or run direct
+`loomex login` as a fallback: it bypasses the MCP authentication flow and its
+structured safety contract.
+
 `loomex_auth_logout` removes Loomex credentials from this device and is a
 sensitive state change. Confirm the user's intent before calling it, then pass
 `confirm: true`. Never print tokens or credential-store material.
