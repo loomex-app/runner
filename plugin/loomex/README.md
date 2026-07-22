@@ -189,3 +189,22 @@ node scripts/validate-package.mjs --release
 ```
 
 That mode requires a real native executable and a complete digest manifest.
+
+Before publishing a release, verify the assembled marketplace through the real
+Codex install and app-server paths:
+
+```bash
+python3 ../../scripts/codex_mcp_discovery_smoke.py \
+  --marketplace-root ../../dist/marketplace
+```
+
+This release-mode smoke installs `loomex@loomex` into a temporary, isolated
+`CODEX_HOME`, exercising the marketplace, plugin cache, `.mcp.json`, launcher,
+runtime manifest, platform selection, and checksum verification. It starts no
+model turn and calls no Loomex tool. It asserts the installed and MCP-advertised
+versions match the assembled manifest, and that Codex sees exactly 30 tools,
+including `loomex_setup_status` and `loomex_workflow_list`.
+
+For a faster development-only check before assembling all native targets, pass
+`--loomex-mcp /absolute/path/to/loomex-mcp --expected-version <version>`. That
+mode verifies MCP discovery but intentionally does not cover plugin packaging.

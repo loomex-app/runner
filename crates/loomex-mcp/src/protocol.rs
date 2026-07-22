@@ -79,6 +79,7 @@ impl Server {
 
     fn list_tools(&self, params: &Value) -> Result<Value, RpcError> {
         let params = require_object(params)?;
+        validate_request_meta(params)?;
         if let Some(cursor) = params.get("cursor") {
             if !cursor.is_null() {
                 return Err(RpcError::invalid_params(
@@ -86,7 +87,7 @@ impl Server {
                 ));
             }
         }
-        if params.keys().any(|key| key != "cursor") {
+        if params.keys().any(|key| key != "cursor" && key != "_meta") {
             return Err(RpcError::invalid_params("unexpected tools/list parameter"));
         }
         Ok(json!({"tools": tools::definitions()}))
@@ -94,7 +95,11 @@ impl Server {
 
     async fn call_tool(&self, params: &Value) -> Result<Value, RpcError> {
         let params = require_object(params)?;
-        if params.keys().any(|key| key != "name" && key != "arguments") {
+        validate_request_meta(params)?;
+        if params
+            .keys()
+            .any(|key| key != "name" && key != "arguments" && key != "_meta")
+        {
             return Err(RpcError::invalid_params("unexpected tools/call parameter"));
         }
         let name = params
@@ -291,6 +296,18 @@ fn require_object(value: &Value) -> Result<&serde_json::Map<String, Value>, RpcE
         .ok_or_else(|| RpcError::invalid_params("params must be an object"))
 }
 
+fn validate_request_meta(params: &serde_json::Map<String, Value>) -> Result<(), RpcError> {
+    if params
+        .get("_meta")
+        .is_some_and(|meta| !meta.is_object() && !meta.is_null())
+    {
+        return Err(RpcError::invalid_params(
+            "params._meta must be an object or null",
+        ));
+    }
+    Ok(())
+}
+
 fn success_response(id: Value, result: Value) -> Value {
     json!({"jsonrpc":"2.0", "id":id, "result":result})
 }
@@ -387,6 +404,95 @@ mod tests {
             "params":{"name":"loomex_run_wait","arguments":{"executionId":"r","timeoutSeconds":46}}
         })).await.unwrap();
         assert_eq!(response["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn tool_requests_accept_reserved_metadata_but_reject_unknown_parameters() {
+        let metadata = json!({
+            "progressToken": 1,
+            "com.openai/codex": {"source": "tool-discovery"}
+        });
+        let list_response = server()
+            .handle(json!({
+                "jsonrpc":"2.0", "id":1, "method":"tools/list",
+                "params":{"_meta":metadata.clone()}
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            list_response["result"]["tools"].as_array().unwrap().len(),
+            30
+        );
+        let null_metadata_response = server()
+            .handle(json!({
+                "jsonrpc":"2.0", "id":4, "method":"tools/list",
+                "params":{"_meta":null}
+            }))
+            .await
+            .unwrap();
+        assert!(null_metadata_response.get("error").is_none());
+
+        let call_response = server()
+            .handle(json!({
+                "jsonrpc":"2.0", "id":2, "method":"tools/call",
+                "params":{
+                    "name":"loomex_runner_status",
+                    "arguments":{},
+                    "_meta":metadata
+                }
+            }))
+            .await
+            .unwrap();
+        assert!(call_response.get("error").is_none());
+        assert_eq!(call_response["result"]["isError"], true);
+
+        for (method, params) in [
+            ("tools/list", json!({"unknown":true})),
+            (
+                "tools/call",
+                json!({
+                    "name":"loomex_runner_status",
+                    "arguments":{},
+                    "unknown":true
+                }),
+            ),
+        ] {
+            let response = server()
+                .handle(json!({
+                    "jsonrpc":"2.0", "id":3, "method":method, "params":params
+                }))
+                .await
+                .unwrap();
+            assert_eq!(response["error"]["code"], -32602);
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_requests_reject_scalar_and_array_metadata() {
+        for metadata in [json!("invalid"), json!([])] {
+            for method in ["tools/list", "tools/call"] {
+                let params = if method == "tools/list" {
+                    json!({"_meta":metadata})
+                } else {
+                    json!({
+                        "name":"loomex_runner_status",
+                        "arguments":{},
+                        "_meta":metadata
+                    })
+                };
+                let response = server()
+                    .handle(json!({
+                        "jsonrpc":"2.0", "id":1, "method":method, "params":params
+                    }))
+                    .await
+                    .unwrap();
+                assert_eq!(response["error"]["code"], -32602);
+                assert_eq!(
+                    response["error"]["message"],
+                    "params._meta must be an object or null"
+                );
+            }
+        }
     }
 
     #[test]
