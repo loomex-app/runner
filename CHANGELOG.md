@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7 - 2026-07-22
+
+- Reset the Runner control reconnect backoff after the first successful lease
+  poll of a healthy session, so a later transient disconnect retries from one
+  second instead of retaining an accumulated 30-second delay.
+
 ## 0.1.6 - 2026-07-22
 
 - Accept the MCP protocol's reserved `_meta` parameter on `tools/list` and
