@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13 - 2026-07-24
+
+- Render organization, project, and workflow lists as searchable ChatGPT UI tables.
+- Add explicit table-row selection actions for organizations and projects.
+- Advertise the list-table MCP App resource and `structuredContent` rendering contract.
+
 ## 0.1.12 - 2026-07-24
 
 - Split the Loomex Codex plugin into focused `setup`, `scope`, `workflow`,

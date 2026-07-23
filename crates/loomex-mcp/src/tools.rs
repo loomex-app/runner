@@ -2,6 +2,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 pub const HUMAN_INPUT_APP_URI: &str = "ui://loomex/human-input/v1/form.html";
+pub const LIST_TABLE_APP_URI: &str = "ui://loomex/list/v1/table.html";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,13 +127,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
             obj(&[("confirm", const_true())], &["confirm"]),
             mutating(true, true, true),
         ),
-        tool(
+        tool_with_meta(
             "loomex_org_list",
             "List organizations",
             "List organizations available to the authenticated Loomex account.",
-            "org.list",
             obj(&[], &[]),
             open_ro(),
+            list_table_meta(),
         ),
         tool(
             "loomex_org_select",
@@ -142,13 +143,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
             obj(&[("organizationId", identifier())], &["organizationId"]),
             mutating(false, true, true),
         ),
-        tool(
+        tool_with_meta(
             "loomex_project_list",
             "List projects",
             "List Loomex projects, optionally within an organization.",
-            "project.list",
             obj(&[("organizationId", identifier())], &[]),
             open_ro(),
+            list_table_meta(),
         ),
         tool(
             "loomex_project_select",
@@ -201,13 +202,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
             ),
             mutating(true, true, true),
         ),
-        tool(
+        tool_with_meta(
             "loomex_workflow_list",
             "List workflows",
             "List workflows in the selected or supplied project.",
-            "workflow.list",
             list_schema(&[("projectId", identifier()), ("query", short_string())]),
             open_ro(),
+            list_table_meta(),
         ),
         tool(
             "loomex_workflow_show",
@@ -668,6 +669,18 @@ fn tool_with_meta(
         annotations,
         meta: Some(meta),
     }
+}
+
+fn list_table_meta() -> Value {
+    json!({
+        "ui": {
+            "resourceUri": LIST_TABLE_APP_URI,
+            "visibility": ["model", "app"],
+            "prefersBorder": true
+        },
+        "openai/outputTemplate": LIST_TABLE_APP_URI,
+        "openai/widgetAccessible": true
+    })
 }
 
 fn obj(properties: &[(&str, Value)], required: &[&str]) -> Value {
@@ -1491,6 +1504,32 @@ mod tests {
             respond.meta.as_ref().unwrap()["ui"]["visibility"],
             json!(["model", "app"])
         );
+    }
+
+    #[test]
+    fn list_tools_publish_table_template_metadata() {
+        for name in [
+            "loomex_org_list",
+            "loomex_project_list",
+            "loomex_workflow_list",
+        ] {
+            let definition = definitions()
+                .into_iter()
+                .find(|definition| definition.name == name)
+                .unwrap();
+            assert_eq!(
+                definition.meta.as_ref().unwrap()["ui"]["resourceUri"],
+                LIST_TABLE_APP_URI
+            );
+            assert_eq!(
+                definition.meta.as_ref().unwrap()["openai/outputTemplate"],
+                LIST_TABLE_APP_URI
+            );
+            assert_eq!(
+                definition.meta.as_ref().unwrap()["ui"]["visibility"],
+                json!(["model", "app"])
+            );
+        }
     }
 
     #[test]
