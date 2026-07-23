@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.11 - 2026-07-23
+
+- Make plugin AI/person sub-agent continuity server-managed with explicit
+  `spawn` and `resume` directives for looped node visits.
+- Require successful plugin responses to report the actual sub-agent session,
+  rejecting replacements on resume and reused sessions on fresh-run policy.
+
+## 0.1.10 - 2026-07-23
+
+- Scope Codex plugin workflow discovery and all run operations to `plugin`
+  workflows, while the Loomex Tauri app exclusively uses `app` workflows.
+- Add durable plugin agent-task tools so AI and person nodes pause server
+  execution, run as sub-agents in the current plugin host, and resume with a
+  schema-validated result.
+- Keep human, approval, and plugin-agent response channels isolated and enforce
+  execution mode on workflow history, detail, wait, and cancellation calls.
+
 ## 0.1.9 - 2026-07-23
 
 - Install the signed Codex marketplace ZIP as a verified local snapshot during

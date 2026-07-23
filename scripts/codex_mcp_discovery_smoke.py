@@ -24,8 +24,13 @@ from pathlib import Path
 from typing import Any, TextIO
 
 
-EXPECTED_TOOL_COUNT = 30
-REQUIRED_TOOLS = {"loomex_setup_status", "loomex_workflow_list"}
+EXPECTED_TOOL_COUNT = 32
+REQUIRED_TOOLS = {
+    "loomex_setup_status",
+    "loomex_workflow_list",
+    "loomex_agent_task_list",
+    "loomex_agent_task_respond",
+}
 
 
 class SmokeFailure(RuntimeError):
@@ -436,7 +441,7 @@ def main() -> int:
 
     print(
         f"codex MCP discovery smoke passed ({mode_label}): Loomex serverInfo, "
-        f"{EXPECTED_TOOL_COUNT} tools, and required setup/workflow tools discovered"
+        f"{EXPECTED_TOOL_COUNT} tools, and required setup/workflow/agent tools discovered"
     )
     return 0
 

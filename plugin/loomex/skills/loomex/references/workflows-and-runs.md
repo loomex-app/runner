@@ -8,6 +8,9 @@ local capabilities and approval points need explanation. Pass `workflowId`;
 pass optional `version` when the user selected a particular immutable version.
 If `version` is omitted, report the version returned by Loomex rather than
 claiming one was selected. Do not guess workflow IDs, versions, or schema fields.
+The plugin workflow list is intentionally scoped to `plugin` execution-model
+workflows. Workflows configured for `app` or `server` execution belong to the
+Tauri app or backend surfaces and should not be shown as plugin options.
 
 ## Start
 
@@ -57,8 +60,53 @@ Runner control still requires the impact preview and confirmation described in
 [runner-operations.md](runner-operations.md).
 
 Terminal states are `succeeded`, `failed`, and `cancelled`; use the actual
-structured state returned by the server. Waiting for human input or approval is
-non-terminal. Route those states through the corresponding inbox tools.
+structured state returned by the server. Waiting for plugin agent execution,
+human input, or approval is non-terminal. Route those states through the
+corresponding inbox tools.
+
+## Plugin agent tasks
+
+Plugin workflows pause AI/person nodes on the server and emit a plugin agent
+task. Use `loomex_agent_task_list` scoped by `executionId` after a wait reports
+pending plugin agent work, or after reconnect when a plugin run is waiting.
+
+Each task includes an `agentTask` object. Read its `prompt`, `input`, `schemas`,
+`sessionDirective`, and `instructions` before doing anything. The server is the
+source of truth for sub-agent continuity. `requestedProvider` and
+`requestedModel` are workflow intent metadata; they do not authorize switching
+to another local CLI or running the node on the server.
+
+Obey `sessionDirective.action` exactly:
+
+- `spawn`: create a new sub-agent in the AI host currently running the Loomex
+  plugin. Return its actual opaque ID with `agentSession.action` set to
+  `spawned`. When `previousSessionId` is present, the new ID must differ.
+- `resume`: resume the exact sub-agent named by `sessionDirective.sessionId`.
+  Return that same ID with `agentSession.action` set to `resumed`. Never spawn a
+  replacement if that session cannot be resumed.
+
+For `resume_per_node`, keep the sub-agent available while the workflow remains
+non-terminal because a later loop visit may resume it. For `new_each_run`, each
+loop visit receives `spawn` and must use a distinct session. The directive's
+`visit` and `continuityKey` are server-owned correlation fields; do not alter or
+derive session policy locally.
+
+Submit exactly one structured response with `loomex_agent_task_respond`:
+
+- completed spawn:
+  `{"status":"completed","output":{...},"agentSession":{"id":"actual-id","host":"codex","action":"spawned"}}`
+- completed resume:
+  `{"status":"completed","output":{...},"agentSession":{"id":"the-server-session-id","host":"codex","action":"resumed"}}`
+- plugin host cannot perform the directed action:
+  `{"status":"unavailable","error":{"code":"PLUGIN_AGENT_SUB_AGENT_UNAVAILABLE","message":"...","provider":"plugin_host","model":"inherit"}}`
+- failed local execution:
+  `{"status":"failed","error":{"code":"PLUGIN_AGENT_FAILED","message":"...","provider":"...","model":"..."}}`
+
+The `output` object must match the task's output schema when one is present.
+Never fabricate an AI result or silently create a replacement when the current
+plugin host cannot perform the required spawn/resume action. The server will
+reject a missing, reused, or mismatched session and prevent the execution from
+advancing rather than losing continuity.
 
 A dispatch timeout is a terminal backend result when `loomex_run_get` reports
 the run as `failed`: the job was not leased within the dispatch grace period.
