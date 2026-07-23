@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use loomex_core::{
@@ -22,7 +22,8 @@ use loomex_core::{
     ManagementApiClient, ManagementCredential, ManagementProjectRunnerBinding, Organization,
     Project, ProjectRunnerBindingCreateRequest, ResolvedCliSettings, RunnerStateMachine,
     RunnerUpsertRequest, RunnerWorkflowExecutionListResponse, RunnerWorkflowExecutionResponse,
-    RunnerWorkflowSummary, SystemCredentialStore, LOCAL_CONTROL_PROTOCOL_VERSION,
+    RunnerWorkflowExecutionStartOptions, RunnerWorkflowSummary, SystemCredentialStore,
+    LOCAL_CONTROL_PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -1183,9 +1184,23 @@ impl MacApp {
         credential: &ManagementCredential,
         client: &mut C,
     ) -> CoreResult<MacWorkflowListResponse> {
+        let page = client.list_runner_workflows_filtered(
+            credential,
+            None,
+            Some("app"),
+            None,
+            None,
+            200,
+        )?;
+        let workflows = serde_json::from_value(
+            page.get("workflows")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+        )
+        .map_err(|error| CoreError::new("TAURI_WORKFLOW_LIST_INVALID", error.to_string()))?;
         Ok(MacWorkflowListResponse {
             schema_version: WORKFLOW_LIST_SCHEMA.to_string(),
-            workflows: client.list_runner_workflows(credential)?,
+            workflows,
         })
     }
 
@@ -1218,9 +1233,12 @@ impl MacApp {
         Ok(MacWorkflowRunListResponse {
             schema_version: WORKFLOW_RUN_LIST_SCHEMA.to_string(),
             workflow_id: workflow_id.to_string(),
-            result: client.list_runner_workflow_executions(
+            result: client.list_runner_workflow_executions_filtered_scoped(
                 credential,
                 workflow_id,
+                Some("app"),
+                None,
+                None,
                 limit.clamp(1, 50),
             )?,
         })
@@ -1257,8 +1275,12 @@ impl MacApp {
                 "workflow id is required",
             ));
         }
-        let detail =
-            client.get_runner_workflow_input_schema(credential, workflow_id, version.as_deref())?;
+        let detail = client.get_runner_workflow_input_schema_scoped(
+            credential,
+            workflow_id,
+            version.as_deref(),
+            Some("app"),
+        )?;
         Ok(MacWorkflowInputSchemaResponse {
             schema_version: WORKFLOW_INPUT_SCHEMA_SCHEMA.to_string(),
             workflow_id: workflow_id.to_string(),
@@ -1286,6 +1308,7 @@ impl MacApp {
         self.run_workflow_chat_with(
             request,
             resolved.workspace_path.as_deref(),
+            resolved.binding_id.as_deref(),
             &credential,
             &mut client,
         )
@@ -1295,6 +1318,7 @@ impl MacApp {
         &self,
         request: WorkflowRunChatRequest,
         saved_workspace_path: Option<&str>,
+        saved_binding_id: Option<&str>,
         credential: &ManagementCredential,
         client: &mut C,
     ) -> CoreResult<MacWorkflowRunChatResponse> {
@@ -1332,12 +1356,34 @@ impl MacApp {
                 serde_json::json!(request.selected_files),
             );
         }
-        let result = client.start_runner_workflow_execution(
+        let binding_id = saved_binding_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                CoreError::new(
+                    "TAURI_RUNNER_BINDING_REQUIRED",
+                    "bind this workspace before running an app workflow",
+                )
+            })?;
+        let idempotency_value = format!(
+            "{}:{}:{}",
+            request.workflow_id,
+            request.session_id.as_deref().unwrap_or(""),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let result = client.start_runner_workflow_execution_scoped(
             credential,
-            &request.workflow_id,
-            serde_json::Value::Object(inputs),
-            request.session_id.as_deref(),
-            request.version.as_deref(),
+            RunnerWorkflowExecutionStartOptions {
+                workflow_id: &request.workflow_id,
+                binding_id,
+                inputs: serde_json::Value::Object(inputs),
+                session_id: request.session_id.as_deref(),
+                version: request.version.as_deref(),
+                execution_mode: Some("app"),
+                idempotency_key: &idempotency_key("tauri-workflow-run", &idempotency_value),
+            },
         )?;
         Ok(MacWorkflowRunChatResponse {
             schema_version: WORKFLOW_RUN_CHAT_SCHEMA.to_string(),
@@ -1374,7 +1420,11 @@ impl MacApp {
         }
         Ok(MacWorkflowRunDetailResponse {
             schema_version: WORKFLOW_RUN_DETAIL_SCHEMA.to_string(),
-            result: client.get_runner_workflow_execution(credential, execution_id)?,
+            result: client.get_runner_workflow_execution_scoped(
+                credential,
+                execution_id,
+                Some("app"),
+            )?,
         })
     }
 
@@ -4068,6 +4118,7 @@ mod tests {
         last_runner_workflow_inputs: Option<Value>,
         last_runner_workflow_execution_version: Option<String>,
         last_runner_workflow_schema_version: Option<String>,
+        last_runner_execution_mode: Option<String>,
         runner_execution_response: Option<RunnerWorkflowExecutionResponse>,
         runner_execution_detail_response: Option<RunnerWorkflowExecutionResponse>,
         human_requests: Vec<HumanRequestSummary>,
@@ -4285,6 +4336,21 @@ mod tests {
             }))
         }
 
+        fn start_runner_workflow_execution_scoped(
+            &mut self,
+            credential: &ManagementCredential,
+            options: RunnerWorkflowExecutionStartOptions<'_>,
+        ) -> CoreResult<RunnerWorkflowExecutionResponse> {
+            self.last_runner_execution_mode = options.execution_mode.map(str::to_string);
+            self.start_runner_workflow_execution(
+                credential,
+                options.workflow_id,
+                options.inputs,
+                options.session_id,
+                options.version,
+            )
+        }
+
         fn get_runner_workflow_execution(
             &mut self,
             _credential: &ManagementCredential,
@@ -4311,6 +4377,16 @@ mod tests {
                     timed_out: false,
                     extra: serde_json::Map::new(),
                 }))
+        }
+
+        fn get_runner_workflow_execution_scoped(
+            &mut self,
+            credential: &ManagementCredential,
+            execution_id: &str,
+            execution_mode: Option<&str>,
+        ) -> CoreResult<RunnerWorkflowExecutionResponse> {
+            self.last_runner_execution_mode = execution_mode.map(str::to_string);
+            self.get_runner_workflow_execution(credential, execution_id)
         }
 
         fn list_runner_workflow_executions(
@@ -4340,6 +4416,19 @@ mod tests {
                 }))
         }
 
+        fn list_runner_workflow_executions_filtered_scoped(
+            &mut self,
+            credential: &ManagementCredential,
+            workflow_id: &str,
+            execution_mode: Option<&str>,
+            _status: Option<&str>,
+            _cursor: Option<&str>,
+            limit: usize,
+        ) -> CoreResult<RunnerWorkflowExecutionListResponse> {
+            self.last_runner_execution_mode = execution_mode.map(str::to_string);
+            self.list_runner_workflow_executions(credential, workflow_id, limit)
+        }
+
         fn get_runner_workflow_input_schema(
             &mut self,
             _credential: &ManagementCredential,
@@ -4358,6 +4447,17 @@ mod tests {
                 capabilities: serde_json::Map::new(),
                 extra: serde_json::Map::new(),
             })
+        }
+
+        fn get_runner_workflow_input_schema_scoped(
+            &mut self,
+            credential: &ManagementCredential,
+            workflow_id: &str,
+            version: Option<&str>,
+            execution_mode: Option<&str>,
+        ) -> CoreResult<loomex_core::RunnerWorkflowInputSchemaResponse> {
+            self.last_runner_execution_mode = execution_mode.map(str::to_string);
+            self.get_runner_workflow_input_schema(credential, workflow_id, version)
         }
 
         fn get_workflow_input_schema(
@@ -4939,6 +5039,7 @@ mod tests {
         assert_eq!(WORKFLOW_RUN_LIST_SCHEMA, response.schema_version);
         assert_eq!("wf_123", response.workflow_id);
         assert_eq!("exec_456", response.result.executions[0]["id"]);
+        assert_eq!(Some("app".to_string()), client.last_runner_execution_mode);
     }
 
     #[test]
@@ -4983,6 +5084,7 @@ mod tests {
             Some("2".to_string()),
             client.last_runner_workflow_schema_version
         );
+        assert_eq!(Some("app".to_string()), client.last_runner_execution_mode);
         assert_eq!(
             2,
             response.selected_version.as_ref().unwrap()["versionNumber"]
@@ -5019,6 +5121,7 @@ mod tests {
                     session_id: None,
                 },
                 None,
+                Some("binding_123"),
                 &credential,
                 &mut client,
             )
@@ -5028,6 +5131,7 @@ mod tests {
 
         assert_eq!(WORKFLOW_RUN_CHAT_SCHEMA, response.schema_version);
         assert_eq!(Some("wf_123".to_string()), client.last_runner_workflow_id);
+        assert_eq!(Some("app".to_string()), client.last_runner_execution_mode);
         assert_eq!("Summarize this repo", inputs["prompt"]);
         assert_eq!("Summarize this repo", inputs["message"]);
         assert_eq!("/Users/test/repo", inputs["workspacePath"]);
@@ -5055,6 +5159,7 @@ mod tests {
                     session_id: None,
                 },
                 None,
+                Some("binding_123"),
                 &credential,
                 &mut client,
             )
@@ -5093,6 +5198,7 @@ mod tests {
                 session_id: None,
             },
             None,
+            Some("binding_123"),
             &credential,
             &mut client,
         )

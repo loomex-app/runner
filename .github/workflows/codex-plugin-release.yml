@@ -238,9 +238,14 @@ jobs:
           assert by_id[1]["result"]["serverInfo"]["name"] == "loomex"
           tools = by_id[2]["result"]["tools"]
           names = {tool["name"] for tool in tools}
-          assert len(tools) == 30, sorted(names)
-          assert len(names) == 30, "duplicate MCP tool names"
-          required = {"loomex_setup_status", "loomex_workflow_list"}
+          assert len(tools) == 32, sorted(names)
+          assert len(names) == 32, "duplicate MCP tool names"
+          required = {
+              "loomex_setup_status",
+              "loomex_workflow_list",
+              "loomex_agent_task_list",
+              "loomex_agent_task_respond",
+          }
           assert required <= names, sorted(required - names)
           PY
       - name: Enforce pinned glibc symbol ceiling

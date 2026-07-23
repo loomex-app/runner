@@ -661,6 +661,13 @@ mod tests {
                 Daemon,
                 json!({"requestId": "request-1", "response": {"answer": "yes"}}),
             ),
+            ("loomex_agent_task_list", "agent.list", Daemon, json!({})),
+            (
+                "loomex_agent_task_respond",
+                "agent.respond",
+                Daemon,
+                json!({"requestId": "agent-1", "response": {"status": "completed", "output": {}}}),
+            ),
             ("loomex_approval_list", "approval.list", Daemon, json!({})),
             (
                 "loomex_approval_decide",
@@ -700,7 +707,7 @@ mod tests {
         use std::collections::HashSet;
 
         let contracts = tool_contracts();
-        assert_eq!(contracts.len(), 30);
+        assert_eq!(contracts.len(), 32);
         let advertised = crate::tools::definitions();
         assert_eq!(advertised.len(), contracts.len());
         let expected_names = contracts
@@ -794,7 +801,7 @@ printf '{"schemaVersion":"loomex.cli.pluginControl/v1","method":"%s","result":{"
             .into_iter()
             .filter(|(_, _, transport, _)| *transport == ExpectedTransport::Daemon)
             .collect::<Vec<_>>();
-        assert_eq!(contracts.len(), 11);
+        assert_eq!(contracts.len(), 13);
 
         let temp = tempfile::tempdir().unwrap();
         let socket_path = temp.path().join("control.sock");

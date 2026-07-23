@@ -331,6 +331,38 @@ pub fn definitions() -> Vec<ToolDefinition> {
             mutating(false, true, true),
         ),
         tool(
+            "loomex_agent_task_list",
+            "List plugin agent tasks",
+            "List pending AI/person node tasks that must be executed by the local plugin host.",
+            "agent.list",
+            obj(
+                &[
+                    ("status", enum_string(&["pending", "resolved", "all"])),
+                    ("workflowId", identifier()),
+                    ("executionId", identifier()),
+                    ("cursor", string()),
+                    ("limit", limit()),
+                ],
+                &[],
+            ),
+            open_ro(),
+        ),
+        tool(
+            "loomex_agent_task_respond",
+            "Submit plugin agent result",
+            "Submit the structured result or unavailable error for a plugin-executed AI/person node task.",
+            "agent.respond",
+            obj(
+                &[
+                    ("requestId", identifier()),
+                    ("response", plugin_agent_response()),
+                    ("idempotencyKey", idempotency_key()),
+                ],
+                &["requestId", "response"],
+            ),
+            mutating(false, true, true),
+        ),
+        tool(
             "loomex_approval_list",
             "List approvals",
             "List pending or decided Loomex policy approvals.",
@@ -444,6 +476,8 @@ pub fn route(name: &str) -> Option<ToolRoute> {
                 "loomex_run_cancel" => "run.cancel",
                 "loomex_human_list" => "human.list",
                 "loomex_human_respond" => "human.respond",
+                "loomex_agent_task_list" => "agent.list",
+                "loomex_agent_task_respond" => "agent.respond",
                 "loomex_approval_list" => "approval.list",
                 "loomex_approval_decide" => "approval.decide",
                 "loomex_runner_status" => "status",
@@ -874,27 +908,31 @@ fn output_data_schema(tool_name: &str) -> Value {
         "loomex_run_cancel" => {
             evolvable_object(&[("execution", execution_schema())], &["execution"])
         }
-        "loomex_human_list" | "loomex_approval_list" => evolvable_object(
-            &[
-                ("humanRequests", array_of(human_request_schema())),
-                ("nextCursor", nullable(string())),
-            ],
-            &["humanRequests", "nextCursor"],
-        ),
-        "loomex_human_respond" | "loomex_approval_decide" => evolvable_object(
-            &[
-                ("requestId", identifier()),
-                ("requestStatus", string()),
-                ("executionId", nullable(identifier())),
-                ("executionStatus", nullable(string())),
-            ],
-            &[
-                "requestId",
-                "requestStatus",
-                "executionId",
-                "executionStatus",
-            ],
-        ),
+        "loomex_human_list" | "loomex_approval_list" | "loomex_agent_task_list" => {
+            evolvable_object(
+                &[
+                    ("humanRequests", array_of(human_request_schema())),
+                    ("nextCursor", nullable(string())),
+                ],
+                &["humanRequests", "nextCursor"],
+            )
+        }
+        "loomex_human_respond" | "loomex_approval_decide" | "loomex_agent_task_respond" => {
+            evolvable_object(
+                &[
+                    ("requestId", identifier()),
+                    ("requestStatus", string()),
+                    ("executionId", nullable(identifier())),
+                    ("executionStatus", nullable(string())),
+                ],
+                &[
+                    "requestId",
+                    "requestStatus",
+                    "executionId",
+                    "executionStatus",
+                ],
+            )
+        }
         "loomex_runner_status" => evolvable_object(
             &[
                 ("running", boolean()),
@@ -1146,6 +1184,48 @@ fn const_true() -> Value {
 fn any_value() -> Value {
     json!({})
 }
+fn plugin_agent_response() -> Value {
+    evolvable_object(
+        &[
+            (
+                "status",
+                enum_string(&["completed", "failed", "unavailable"]),
+            ),
+            ("output", json_object()),
+            (
+                "error",
+                evolvable_object(
+                    &[
+                        ("code", string()),
+                        ("message", string()),
+                        ("provider", string()),
+                        ("model", string()),
+                    ],
+                    &["message"],
+                ),
+            ),
+            ("provider", string()),
+            ("model", string()),
+            (
+                "agentSession",
+                evolvable_object(
+                    &[
+                        ("id", json!({"type":"string","minLength":1,"maxLength":512})),
+                        (
+                            "host",
+                            json!({"type":"string","minLength":1,"maxLength":120}),
+                        ),
+                        ("action", enum_string(&["spawned", "resumed"])),
+                        ("provider", string()),
+                        ("model", string()),
+                    ],
+                    &["id", "host", "action"],
+                ),
+            ),
+        ],
+        &["status"],
+    )
+}
 fn json_object() -> Value {
     json!({"type":"object"})
 }
@@ -1280,6 +1360,12 @@ mod tests {
             "loomex_human_respond" => {
                 json!({"requestId":"human-1","requestStatus":"resolved","executionId":"run-1","executionStatus":"running"})
             }
+            "loomex_agent_task_list" => {
+                json!({"humanRequests":[{"id":"agent-1","status":"pending","title":"Run plugin agent task","description":"Execute in the current plugin host","blocking":true,"agentTask":{"schemaVersion":"loomex.plugin-agent-task/v1","executionStrategy":"plugin_host_sub_agent","provider":"plugin_host","model":"inherit","requestedProvider":"codex","requestedModel":"auto","prompt":"Summarize","input":{},"schemas":{},"instructions":{"strategy":"sub_agent","host":"current_plugin_host"}}}],"nextCursor":null})
+            }
+            "loomex_agent_task_respond" => {
+                json!({"requestId":"agent-1","requestStatus":"resolved","executionId":"run-1","executionStatus":"running"})
+            }
             "loomex_approval_list" => {
                 json!({"humanRequests":[{"id":"approval-1","status":"pending","title":"Approve","description":"Please approve","blocking":true}],"nextCursor":null})
             }
@@ -1321,7 +1407,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_unique_route_and_strict_top_level_schema() {
         let definitions = definitions();
-        assert_eq!(definitions.len(), 30);
+        assert_eq!(definitions.len(), 32);
         let mut names = HashSet::new();
         for tool in definitions {
             assert!(names.insert(tool.name));

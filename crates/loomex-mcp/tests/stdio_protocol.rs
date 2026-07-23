@@ -124,7 +124,23 @@ fn subprocess_speaks_clean_json_rpc_and_forwards_to_local_control() {
     assert_eq!(responses.len(), 3, "notifications must not emit a frame");
     let response = |id: i64| responses.iter().find(|item| item["id"] == id).unwrap();
     assert_eq!(response(1)["result"]["protocolVersion"], "2025-06-18");
-    assert_eq!(response(2)["result"]["tools"].as_array().unwrap().len(), 30);
+    assert_eq!(response(2)["result"]["tools"].as_array().unwrap().len(), 32);
+    let agent_response_tool = response(2)["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "loomex_agent_task_respond")
+        .unwrap();
+    assert_eq!(
+        agent_response_tool["inputSchema"]["properties"]["response"]["properties"]["agentSession"]
+            ["required"],
+        json!(["id", "host", "action"])
+    );
+    assert_eq!(
+        agent_response_tool["inputSchema"]["properties"]["response"]["properties"]["agentSession"]
+            ["properties"]["action"]["enum"],
+        json!(["spawned", "resumed"])
+    );
     assert_eq!(
         response(3)["result"]["structuredContent"]["schemaVersion"],
         "loomex.mcp/v1"
