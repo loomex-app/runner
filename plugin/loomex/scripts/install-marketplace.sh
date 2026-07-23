@@ -8,6 +8,10 @@ case "$version" in
     exit 2
     ;;
 esac
+archive=${2:-}
+if [ -n "$archive" ]; then
+  test -f "$archive" && test ! -L "$archive"
+fi
 
 provenance="loomex-codex-marketplace-$version.provenance.json"
 bundle="$provenance.sigstore.json"
@@ -22,7 +26,8 @@ umask 077
 temporary="$(mktemp -d "${TMPDIR:-/tmp}/loomex-marketplace-install.XXXXXX")"
 cleanup() {
   chmod u+w "$temporary/provenance.json" "$temporary/provenance.sigstore.json" 2>/dev/null || true
-  rm -f "$temporary/provenance.json" "$temporary/provenance.sigstore.json"
+  chmod u+w "$temporary/marketplace.zip" 2>/dev/null || true
+  rm -f "$temporary/provenance.json" "$temporary/provenance.sigstore.json" "$temporary/marketplace.zip"
   rmdir "$temporary" 2>/dev/null || true
 }
 trap cleanup 0
@@ -30,6 +35,12 @@ trap 'exit 1' HUP INT TERM
 cp "$provenance" "$temporary/provenance.json"
 cp "$bundle" "$temporary/provenance.sigstore.json"
 chmod 400 "$temporary/provenance.json" "$temporary/provenance.sigstore.json"
+archive_arg=
+if [ -n "$archive" ]; then
+  cp "$archive" "$temporary/marketplace.zip"
+  chmod 400 "$temporary/marketplace.zip"
+  archive_arg="$temporary/marketplace.zip"
+fi
 
 # Open the verified payload twice before verification. The descriptors refer to
 # the same immutable copied inode but have independent offsets: Cosign consumes
@@ -55,13 +66,17 @@ else
     /dev/fd/3
 fi
 
-python3 - "$version" 4<&4 <<'PY'
+python3 - "$version" "$archive_arg" 4<&4 <<'PY'
+import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 
@@ -396,6 +411,88 @@ def add_local_marketplace(source):
     codex_json("plugin", "marketplace", "add", source)
 
 
+def data_home():
+    configured = os.environ.get("XDG_DATA_HOME")
+    if configured:
+        return Path(configured)
+    return Path.home() / ".local" / "share"
+
+
+def safe_extract_marketplace_archive(archive_path, destination):
+    with zipfile.ZipFile(archive_path) as archive:
+        for member in archive.infolist():
+            name = member.filename
+            if not name or "\x00" in name:
+                fail("marketplace archive contains an invalid member name")
+            target = Path(name)
+            if target.is_absolute() or ".." in target.parts:
+                fail("marketplace archive contains an unsafe path")
+            mode = (member.external_attr >> 16) & 0o170000
+            if mode == stat.S_IFLNK:
+                fail("marketplace archive contains a symlink")
+        archive.extractall(destination)
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def install_local_archive(archive_path, payload, version):
+    archive_descriptor = payload.get("archive")
+    if not isinstance(archive_descriptor, dict):
+        fail("verified provenance does not describe a marketplace archive")
+    expected_name = f"loomex-codex-marketplace-{version}.zip"
+    if archive_descriptor.get("name") != expected_name:
+        fail("verified provenance archive name does not match the requested version")
+    expected_digest = archive_descriptor.get("sha256")
+    if not isinstance(expected_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        fail("verified provenance archive digest is invalid")
+    archive_path = Path(archive_path)
+    if archive_path.name != "marketplace.zip":
+        fail("installer archive path was not staged safely")
+    if sha256_file(archive_path) != expected_digest:
+        fail("marketplace archive digest does not match verified provenance")
+
+    root = data_home() / "loomex-codex-marketplace" / version
+    parent = root.parent
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{version}.", dir=parent))
+    try:
+        safe_extract_marketplace_archive(archive_path, staging)
+        manifest = staging / ".agents" / "plugins" / "marketplace.json"
+        plugin_manifest = staging / "plugins" / "loomex" / ".codex-plugin" / "plugin.json"
+        if not manifest.is_file() or not plugin_manifest.is_file():
+            fail("marketplace archive is missing required manifests")
+        plugin = json.loads(plugin_manifest.read_text(encoding="utf-8"))
+        if plugin.get("name") != "loomex" or plugin.get("version") != version:
+            fail("marketplace archive plugin manifest does not match the requested version")
+        marker = {
+            "schemaVersion": 1,
+            "pluginVersion": version,
+            "archiveSha256": expected_digest,
+            "marketplaceCommit": payload["marketplace"]["commit"],
+        }
+        (staging / ".loomex-codex-release.json").write_text(
+            json.dumps(marker, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if root.exists() or root.is_symlink():
+            mode = os.lstat(root).st_mode
+            if not stat.S_ISDIR(mode):
+                fail("existing Loomex marketplace install path is not a directory")
+            shutil.rmtree(root)
+        os.replace(staging, root)
+        staging = None
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+    return str(root)
+
+
 def verify_state(expected_marketplace, installed):
     current_marketplace = marketplace_entry()
     current_plugin = plugin_state()
@@ -461,6 +558,34 @@ if not (
 previous = snapshot()
 old_marketplace = previous["marketplace"]
 old_plugin = previous["plugin"]
+archive_path = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+
+if archive_path is not None:
+    local_source = install_local_archive(archive_path, payload, sys.argv[1])
+    if (
+        old_marketplace is not None
+        and old_marketplace["kind"] == "local"
+        and old_marketplace["source"] == local_source
+        and old_plugin["installed"]
+        and old_plugin["enabled"]
+    ):
+        verify_state({"kind": "local", "source": local_source}, True)
+        sys.exit(0)
+    try:
+        if old_marketplace is not None:
+            if old_plugin["installed"]:
+                codex_json("plugin", "remove", PLUGIN_ID)
+            codex_json("plugin", "marketplace", "remove", MARKETPLACE)
+        add_local_marketplace(local_source)
+        codex_json("plugin", "add", PLUGIN_ID)
+        verify_state({"kind": "local", "source": local_source}, True)
+    except Exception as original_error:
+        try:
+            restore(previous)
+        except Exception as rollback_error:
+            fail(f"installation failed: {original_error}; rollback also failed: {rollback_error}")
+        fail(f"installation failed and the prior state was restored: {original_error}")
+    sys.exit(0)
 
 # Exact-ref, installed state is already the desired result. A matching checkout
 # configured through a mutable branch/tag is deliberately rewritten below.

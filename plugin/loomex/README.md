@@ -28,9 +28,9 @@ GitHub selects the latest stable, non-prerelease release. That release's version
 is embedded in the downloaded script, which then uses version-specific asset
 URLs authenticated by Sigstore. It obtains a temporary pinned Cosign binary and
 verifies its pinned SHA-256, downloads an official Sigstore trusted-root
-snapshot from a pinned commit and verifies its SHA-256, and verifies both the
-versioned installer and marketplace provenance before any Codex change. It does
-not install Cosign
+snapshot from a pinned commit and verifies its SHA-256, and verifies the
+versioned installer, marketplace provenance, and marketplace ZIP before any
+Codex change. It does not install Cosign
 globally, modify Loomex credentials/backend configuration, bypass macOS
 quarantine, or use insecure Sigstore options.
 
@@ -46,7 +46,9 @@ script itself. For high-assurance installation, download `install-codex.sh` and
 Cosign against the exact workflow/tag identity below, and then run the verified
 file. Each release also publishes a complete Codex marketplace snapshot,
 provenance, and `loomex-install-marketplace-<version>.sh`, each with a keyless
-Sigstore bundle.
+Sigstore bundle. The normal installer installs the verified ZIP as a local,
+versioned marketplace snapshot, so it does not depend on Codex cloning GitHub
+during installation.
 
 The lower-level verified installer opens the versioned installer twice before
 verification, confirms both descriptors identify the same file,
@@ -67,31 +69,37 @@ cosign verify-blob \
   --certificate-identity "https://github.com/loomex-app/runner/.github/workflows/codex-plugin-release.yml@refs/tags/v$version" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   /dev/fd/3
-exec sh /dev/fd/4 "$version"
+archive="loomex-codex-marketplace-$version.zip"
+test -f "$archive" && test ! -L "$archive"
+exec sh /dev/fd/4 "$version" "$archive"
 ' sh <release-version>
 ```
 
-Only the verified exact 40-character commit value is used for installation.
-The exact commit is content-addressed and cannot move. Do not substitute the
+Only the marketplace ZIP whose SHA-256 is bound by the verified provenance is
+used for the normal installation. The provenance also binds the exact
+40-character marketplace commit and Git tree used to produce that ZIP; those
+content-addressed identifiers cannot move. Do not substitute the
 `codex-plugin-marketplace-v<version>` publication branch, a tag, or another
-symbolic ref: those names can be moved. The first command is a one-time
-marketplace registration for that exact snapshot. The second installs the
-adapter, Runner, and `loomex-core`-based runtime together; users do not install
-a separate native package. Start a new Codex task after installing or upgrading
-so the new MCP tools are loaded.
+symbolic ref to select installation bytes: those names can be moved. The
+installer registers the verified local snapshot, then installs the adapter,
+Runner, and `loomex-core`-based runtime together; users do not install a
+separate native package. Start a new Codex task after installing or upgrading so
+the new MCP tools are loaded.
 
 For an offline/local install, first verify
 `loomex-codex-marketplace-<version>.zip.sigstore.json` with the same pinned
-issuer and workflow identity. Only then extract the ZIP, pass its directory to
-`codex plugin marketplace add`, and run the same
-`codex plugin add loomex@loomex` command.
+issuer and workflow identity. Then run the verified
+`loomex-install-marketplace-<version>.sh` with the version and ZIP path; it will
+verify the ZIP digest against signed provenance, extract it into the user's
+local data directory, register that local marketplace, and install
+`loomex@loomex`.
 
 Run the one-command installer again to upgrade. It inspects the existing Codex
-marketplace and plugin state, does nothing when the same exact commit is already
-installed, and otherwise replaces the marketplace with the newly verified
-exact commit. If any upgrade step fails, it restores the previous checkout by
-its captured exact commit—or the previous local marketplace path—and restores
-whether the plugin was installed. A
+marketplace and plugin state, does nothing when the same verified local snapshot
+is already installed, and otherwise replaces the marketplace with the newly
+verified local snapshot. If any upgrade step fails, it restores the previous
+checkout by its captured exact commit—or the previous local marketplace path—and
+restores whether the plugin was installed. A
 pre-existing sparse or disabled Loomex installation is rejected before any
 change because the current Codex CLI cannot reproduce that state safely.
 
@@ -104,9 +112,9 @@ OIDC issuer plus exact repository/workflow/tag identity shown above—not a publ
 key downloaded beside the release assets.
 
 The offline/local path verifies the marketplace ZIP's `.sigstore.json` bundle
-with the same issuer and workflow identity before installing the extracted
-directory. Both paths avoid trusting a mutable branch or co-located replacement
-key to select installation bytes.
+with the same issuer and workflow identity before handing it to the installer.
+Both paths avoid trusting a mutable branch or co-located replacement key to
+select installation bytes.
 
 Typical prompts:
 

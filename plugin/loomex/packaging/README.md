@@ -50,10 +50,13 @@ identity. No Loomex private signing key or Apple credential is stored.
 
 The publication job reconstructs the orphan marketplace commit from the
 verified archive and refuses to replace an existing publication ref. The
-version branch is only a discoverability pointer: normal installation must verify provenance first
-and pass the exact 40-character
-`marketplace.commit` to Codex `--ref`. The online and offline installers both
-fail closed before mutation if provenance or Sigstore verification fails.
+version branch is only a discoverability pointer: normal installation must
+verify provenance first and install the marketplace ZIP whose SHA-256 is bound
+by that provenance. The provenance still records the exact 40-character
+`marketplace.commit` for reconstruction and audit, but the user-facing
+installer registers a verified local snapshot so it is not vulnerable to Codex's
+Git clone timeout. The online and offline installers both fail closed before
+mutation if provenance or Sigstore verification fails.
 
 The user-facing URL is
 `https://github.com/loomex-app/runner/releases/latest/download/install-codex.sh`.
