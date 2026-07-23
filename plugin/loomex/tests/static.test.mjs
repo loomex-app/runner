@@ -26,6 +26,17 @@ test("skill exposes the settled MCP tool contract exactly", async () => {
   assert.doesNotMatch(skill, /loomex_organization_|loomex_human_request_/);
 });
 
+test("plugin exposes focused child skills for the main Loomex task areas", async () => {
+  const childSkills = ["setup", "scope", "workflow", "runs", "human"];
+  for (const name of childSkills) {
+    const child = await readFile(path.join(root, "skills", name, "SKILL.md"), "utf8");
+    assert.match(child, new RegExp(`^name: ${name}$`, "m"));
+    assert.doesNotMatch(child, /\[TODO:/);
+  }
+  const router = await readFile(path.join(root, "skills", "loomex", "SKILL.md"), "utf8");
+  for (const name of childSkills) assert.match(router, new RegExp(`\\b${name}\\b`));
+});
+
 test("documentation states durable execution and the closed-Codex limitation", async () => {
   const readme = await readFile(path.join(root, "README.md"), "utf8");
   const architecture = await readFile(
@@ -162,7 +173,7 @@ test("natural Loomex requests automatically enter first-use onboarding", async (
   const readme = await readFile(path.join(root, "README.md"), "utf8");
   const installer = await readFile(path.join(root, "scripts", "install-codex.sh"), "utf8");
 
-  assert.equal(manifest.version, "0.1.11");
+  assert.equal(manifest.version, "0.1.12");
   assert.match(manifest.interface.longDescription, /automatically checks first-use readiness/);
   assert.match(manifest.interface.defaultPrompt.join("\n"), /setup should start automatically/);
   assert.match(skill, /For every natural-language Loomex request/);
