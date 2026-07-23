@@ -123,6 +123,11 @@ Typical prompts:
 - `Wait for run 123 and show me any human requests.`
 - `Show pending Loomex approvals.`
 
+Typed Human Input requests open as an interactive Codex side panel. The panel
+renders the request's `multi_select`, `single_select`, `text`, or `boolean`
+contract and submits directly to the durable request; legacy human requests
+remain available through the chat-based response flow.
+
 Every tool publishes a tool-specific `outputSchema` and returns the same
 discriminated structured envelope. Successful calls have
 `{schemaVersion: "loomex.mcp/v1", ok: true, tool, data, meta}`; failed calls

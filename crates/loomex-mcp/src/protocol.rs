@@ -15,6 +15,8 @@ use crate::{
 
 pub const MCP_ENVELOPE_VERSION: &str = "loomex.mcp/v1";
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MCP_APP_MIME_TYPE: &str = "text/html;profile=mcp-app";
+const HUMAN_INPUT_APP_HTML: &str = include_str!("human_input_app.html");
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 static NEXT_ENVELOPE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -54,6 +56,8 @@ impl Server {
             "ping" => Ok(json!({})),
             "tools/list" => self.list_tools(&params),
             "tools/call" => self.call_tool(&params).await,
+            "resources/list" => self.list_resources(&params),
+            "resources/read" => self.read_resource(&params),
             _ => Err(RpcError::new(-32601, "Method not found")),
         };
         Some(match result {
@@ -71,7 +75,7 @@ impl Server {
         };
         Ok(json!({
             "protocolVersion": protocol_version,
-            "capabilities": {"tools": {"listChanged": false}},
+            "capabilities": {"tools": {"listChanged": false}, "resources": {"listChanged": false}},
             "serverInfo": {"name": "loomex", "title": "Loomex Local Workflow Runner", "version": env!("CARGO_PKG_VERSION")},
             "instructions": "For every Loomex request, first call loomex_setup_status and follow recommendedNextAction. For setup.plan, immediately call read-only loomex_setup_plan. Ask approval only before loomex_setup_apply. For binding.create after an identity mismatch, show the exact repair and ask before loomex_binding_create; never rewrite identity silently. Complete auth, scope, and binding, then resume the original request. Never require a special setup phrase."
         }))
@@ -91,6 +95,55 @@ impl Server {
             return Err(RpcError::invalid_params("unexpected tools/list parameter"));
         }
         Ok(json!({"tools": tools::definitions()}))
+    }
+
+    fn list_resources(&self, params: &Value) -> Result<Value, RpcError> {
+        let params = require_object(params)?;
+        validate_request_meta(params)?;
+        if params.keys().any(|key| key != "cursor" && key != "_meta") {
+            return Err(RpcError::invalid_params(
+                "unexpected resources/list parameter",
+            ));
+        }
+        Ok(json!({
+            "resources": [{
+                "uri": tools::HUMAN_INPUT_APP_URI,
+                "name": "Loomex Human Input",
+                "title": "Loomex Human Input",
+                "description": "Interactive side-panel form for Loomex human input requests.",
+                "mimeType": MCP_APP_MIME_TYPE
+            }]
+        }))
+    }
+
+    fn read_resource(&self, params: &Value) -> Result<Value, RpcError> {
+        let params = require_object(params)?;
+        validate_request_meta(params)?;
+        if params.keys().any(|key| key != "uri" && key != "_meta") {
+            return Err(RpcError::invalid_params(
+                "unexpected resources/read parameter",
+            ));
+        }
+        let uri = params
+            .get("uri")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::invalid_params("resources/read.uri is required"))?;
+        if uri != tools::HUMAN_INPUT_APP_URI {
+            return Err(RpcError::invalid_params("unknown Loomex resource"));
+        }
+        Ok(json!({
+            "contents": [{
+                "uri": tools::HUMAN_INPUT_APP_URI,
+                "mimeType": MCP_APP_MIME_TYPE,
+                "text": HUMAN_INPUT_APP_HTML,
+                "_meta": {
+                    "ui": {
+                        "csp": {"connectDomains": [], "resourceDomains": []},
+                        "prefersBorder": false
+                    }
+                }
+            }]
+        }))
     }
 
     async fn call_tool(&self, params: &Value) -> Result<Value, RpcError> {
@@ -114,6 +167,20 @@ impl Server {
             .unwrap_or_else(|| json!({}));
         tools::validate_arguments(&definition.input_schema, &arguments)
             .map_err(RpcError::invalid_params)?;
+        if name == "loomex_human_open" {
+            let request_id = next_envelope_id();
+            let human_request = arguments
+                .get("humanRequest")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let envelope =
+                success_envelope(name, request_id, json!({"humanRequest": human_request}));
+            return Ok(json!({
+                "content": [{"type":"text", "text": "Opened the Loomex human input side panel."}],
+                "structuredContent": envelope,
+                "isError": false
+            }));
+        }
         let route = tools::route(name).expect("every definition has a route");
         let deadline = match route.deadline {
             DeadlineKind::Default => Duration::from_secs(12),
@@ -378,6 +445,10 @@ mod tests {
             response["result"]["capabilities"]["tools"]["listChanged"],
             false
         );
+        assert_eq!(
+            response["result"]["capabilities"]["resources"]["listChanged"],
+            false
+        );
         let instructions = response["result"]["instructions"].as_str().unwrap();
         assert!(instructions.len() <= 512);
         assert!(
@@ -395,6 +466,71 @@ mod tests {
             .handle(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
             .await;
         assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn human_input_app_resource_is_advertised_and_readable() {
+        let list = server()
+            .handle(json!({
+                "jsonrpc":"2.0", "id":1, "method":"resources/list", "params":{}
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            list["result"]["resources"][0]["uri"],
+            tools::HUMAN_INPUT_APP_URI
+        );
+        assert_eq!(
+            list["result"]["resources"][0]["mimeType"],
+            MCP_APP_MIME_TYPE
+        );
+
+        let read = server()
+            .handle(json!({
+                "jsonrpc":"2.0", "id":2, "method":"resources/read",
+                "params":{"uri":tools::HUMAN_INPUT_APP_URI}
+            }))
+            .await
+            .unwrap();
+        let content = &read["result"]["contents"][0];
+        assert_eq!(content["mimeType"], MCP_APP_MIME_TYPE);
+        let html = content["text"].as_str().unwrap();
+        assert!(html.contains("requestDisplayMode"));
+        assert!(html.contains("loomex_human_respond"));
+        assert!(html.contains("multi_select"));
+        assert!(html.contains("single_select"));
+        assert!(html.contains("boolean"));
+        assert!(html.contains("question-card"));
+        assert!(html.contains("answers"));
+    }
+
+    #[tokio::test]
+    async fn human_open_returns_the_exact_request_for_the_side_panel() {
+        let human_request = json!({
+            "id":"human-1",
+            "status":"pending",
+            "inputSpec":{
+                "schemaVersion":"loomex.human-input/v1",
+                "inputType":"boolean",
+                "question":"Continue?"
+            }
+        });
+        let response = server()
+            .handle(json!({
+                "jsonrpc":"2.0", "id":1, "method":"tools/call",
+                "params":{
+                    "name":"loomex_human_open",
+                    "arguments":{"humanRequest":human_request}
+                }
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response["result"]["structuredContent"]["data"]["humanRequest"],
+            human_request
+        );
+        assert_eq!(response["result"]["isError"], false);
     }
 
     #[tokio::test]
@@ -421,7 +557,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             list_response["result"]["tools"].as_array().unwrap().len(),
-            32
+            33
         );
         let null_metadata_response = server()
             .handle(json!({
