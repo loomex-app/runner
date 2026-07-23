@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Loomex Human Input</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 22px;
+        color: light-dark(#16161d, #f7f7fb);
+        background: light-dark(#f7f8fb, #14151a);
+      }
+      main { width: min(100%, 680px); margin: 0 auto; }
+      .eyebrow {
+        margin: 0 0 8px;
+        color: #14b8a6;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+      }
+      h1 { margin: 0 0 8px; font-size: 24px; line-height: 1.18; }
+      .summary { margin: 0 0 22px; color: light-dark(#656676, #aaaab5); line-height: 1.5; }
+      form { display: grid; gap: 16px; }
+      textarea, input[type="text"] {
+        width: 100%;
+        border: 1px solid light-dark(#d8dbe5, #3a3c47);
+        border-radius: 10px;
+        padding: 11px 12px;
+        color: inherit;
+        background: light-dark(#fff, #20222a);
+        font: inherit;
+        outline: none;
+      }
+      textarea { min-height: 130px; resize: vertical; }
+      textarea:focus, input[type="text"]:focus {
+        border-color: #14b8a6;
+        box-shadow: 0 0 0 3px color-mix(in srgb, #14b8a6 18%, transparent);
+      }
+      .option {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        border: 1px solid light-dark(#dfe2ea, #343743);
+        border-radius: 11px;
+        padding: 12px;
+        background: light-dark(#fff, #1d1f27);
+        cursor: pointer;
+      }
+      .option input { margin-top: 3px; }
+      .option span { line-height: 1.4; }
+      .question-card {
+        border: 1px solid light-dark(#dfe2ea, #343743);
+        border-radius: 14px;
+        padding: 16px;
+        background: light-dark(#fff, #1a1c23);
+      }
+      .question-head { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 13px; }
+      .question-number {
+        display: grid;
+        flex: 0 0 28px;
+        height: 28px;
+        place-items: center;
+        border-radius: 999px;
+        color: #8b5cf6;
+        background: color-mix(in srgb, #8b5cf6 14%, transparent);
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .question-title { margin: 3px 0 0; font-size: 15px; line-height: 1.4; }
+      .question-controls { display: grid; gap: 10px; }
+      .actions { display: flex; justify-content: space-between; gap: 10px; padding-top: 4px; }
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 11px 17px;
+        color: #08110f;
+        background: #14f1d6;
+        font: inherit;
+        font-weight: 800;
+        cursor: pointer;
+      }
+      button.secondary { color: inherit; background: light-dark(#e9ebf2, #30333d); }
+      button:disabled { cursor: progress; opacity: .65; }
+      .status {
+        display: none;
+        margin-top: 16px;
+        border: 1px solid light-dark(#bfe8cc, #2b6540);
+        border-radius: 11px;
+        padding: 13px;
+        color: light-dark(#176b35, #8be1a7);
+        background: light-dark(#edf9f1, #15281c);
+      }
+      .status.error {
+        border-color: light-dark(#efc2c2, #713434);
+        color: light-dark(#a02828, #ffaaaa);
+        background: light-dark(#fff0f0, #2d1717);
+      }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Loomex human input</p>
+      <h1 id="title">Human input required</h1>
+      <p id="summary" class="summary"></p>
+      <form id="form"></form>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+    </main>
+
+    <script>
+      const form = document.querySelector("#form");
+      const statusEl = document.querySelector("#status");
+      let humanRequest = null;
+
+      function toolOutput() {
+        return window.openai?.toolOutput?.data || window.openai?.toolOutput || {};
+      }
+
+      function normalizeRequest(output) {
+        return output.humanRequest || output.request || output;
+      }
+
+      function spec() {
+        return humanRequest?.inputSpec || {};
+      }
+
+      function normalizeInputType(value) {
+        const raw = String(value || "text").replace("-", "_");
+        if (raw === "true_false" || raw === "bool") return "boolean";
+        return ["multi_select", "single_select", "text", "boolean"].includes(raw) ? raw : "text";
+      }
+
+      function inputType() {
+        return normalizeInputType(spec().inputType);
+      }
+
+      function isBatch() {
+        return spec().collectionMode === "batch" || Array.isArray(spec().questions);
+      }
+
+      function setStatus(message, error = false) {
+        statusEl.textContent = message;
+        statusEl.className = error ? "status error" : "status";
+        statusEl.style.display = "block";
+      }
+
+      async function requestSidePanel() {
+        try {
+          await window.openai?.requestDisplayMode?.({ mode: "fullscreen" });
+        } catch {}
+      }
+
+      function render(output = toolOutput()) {
+        humanRequest = normalizeRequest(output);
+        const currentSpec = spec();
+        document.querySelector("#title").textContent =
+          currentSpec.question || humanRequest.title || "Human input required";
+        document.querySelector("#summary").textContent =
+          humanRequest.description || humanRequest.context?.summary || "";
+
+        const disabled = humanRequest.status === "resolved";
+        const controls = [];
+        if (isBatch()) {
+          for (const [index, question] of (currentSpec.questions || []).entries()) {
+            controls.push(`<section class="question-card">
+              <div class="question-head">
+                <span class="question-number">${index + 1}</span>
+                <h2 class="question-title">${escapeHtml(question.question)}</h2>
+              </div>
+              <div class="question-controls">${questionControls(question, index, disabled)}</div>
+            </section>`);
+          }
+        } else {
+          controls.push(questionControls(currentSpec, 0, disabled));
+        }
+
+        form.innerHTML = controls.join("") + `
+          <div class="actions">
+            <button id="expand" class="secondary" type="button">Open in side panel</button>
+            <button id="submit" type="submit" ${disabled ? "disabled" : ""}>Submit & Resume</button>
+          </div>`;
+
+        document.querySelector("#expand").addEventListener("click", () => void requestSidePanel());
+      }
+
+      function questionControls(question, index, disabled) {
+        const type = normalizeInputType(question.inputType);
+        const name = `value-${index}`;
+        if (type === "text") {
+          return `<textarea id="answer-${index}" required placeholder="Type your answer" ${disabled ? "disabled" : ""}></textarea>`;
+        }
+        if (type === "boolean") {
+          return [
+            optionHtml("true", "True", "radio", name, disabled),
+            optionHtml("false", "False", "radio", name, disabled),
+          ].join("");
+        }
+        const controls = [];
+        const controlType = type === "multi_select" ? "checkbox" : "radio";
+        for (const option of (question.options || []).slice(0, 4)) {
+          controls.push(optionHtml(option.id, option.label, controlType, name, disabled));
+        }
+        if (question.allowOther !== false) {
+          controls.push(optionHtml("other", question.otherLabel || "Other", controlType, name, disabled));
+          controls.push(`<input id="otherText-${index}" type="text" placeholder="Type other answer" ${disabled ? "disabled" : ""} />`);
+        }
+        return controls.join("");
+      }
+
+      function optionHtml(value, label, type, name, disabled) {
+        return `<label class="option">
+          <input type="${type}" name="${name}" value="${escapeHtml(value)}" ${disabled ? "disabled" : ""} />
+          <span>${escapeHtml(label)}</span>
+        </label>`;
+      }
+
+      function escapeHtml(value) {
+        return String(value || "").replace(/[&<>"']/g, (char) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#039;",
+        }[char]));
+      }
+
+      function answerPayload() {
+        if (isBatch()) {
+          return {
+            answers: (spec().questions || []).map((question, index) => ({
+              questionId: question.id || `question_${index + 1}`,
+              ...answerForQuestion(question, index),
+            })),
+          };
+        }
+        return answerForQuestion(spec(), 0);
+      }
+
+      function answerForQuestion(question, index) {
+        const type = normalizeInputType(question.inputType);
+        const name = `value-${index}`;
+        if (type === "text") {
+          const value = document.querySelector(`#answer-${index}`)?.value.trim() || "";
+          if (!value) throw new Error("Answer is required.");
+          return { value };
+        }
+        if (type === "boolean") {
+          const selected = document.querySelector(`input[name="${name}"]:checked`)?.value;
+          if (selected === undefined) throw new Error("Select true or false.");
+          return { value: selected === "true" };
+        }
+        const selected = [...document.querySelectorAll(`input[name="${name}"]:checked`)].map((input) => input.value);
+        const otherText = document.querySelector(`#otherText-${index}`)?.value.trim() || "";
+        if (!selected.length) throw new Error(type === "multi_select" ? "Select at least one option." : "Select one option.");
+        if (selected.includes("other") && !otherText) throw new Error("Other option requires text.");
+        return type === "multi_select" ? { values: selected, otherText } : { value: selected[0], otherText };
+      }
+
+      render();
+      void requestSidePanel();
+
+      window.addEventListener("openai:set_globals", (event) => {
+        const output = event.detail?.globals?.toolOutput;
+        render(output?.data || output || toolOutput());
+      });
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        statusEl.style.display = "none";
+        if (!window.openai?.callTool) {
+          setStatus("This host does not expose the app tool bridge.", true);
+          return;
+        }
+        const submit = document.querySelector("#submit");
+        submit.disabled = true;
+        submit.textContent = "Submitting...";
+        try {
+          const result = await window.openai.callTool("loomex_human_respond", {
+            requestId: humanRequest.id,
+            response: answerPayload(),
+          });
+          const output = result?.structuredContent || {};
+          if (output.ok === false) throw new Error(output.error?.message || "Loomex rejected the answer.");
+          setStatus("Submitted. The workflow resume has been queued.");
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : "Submit failed.", true);
+        } finally {
+          submit.disabled = false;
+          submit.textContent = "Submit & Resume";
+        }
+      });
+    </script>
+  </body>
+</html>

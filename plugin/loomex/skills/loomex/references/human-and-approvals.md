@@ -8,10 +8,19 @@ assumption, a previous run, or the model's preference.
 Use `loomex_human_list`, scoped with optional `executionId` or `workflowId` when
 known; optional `status` is `pending`, `resolved`, or `all`, and `limit` bounds
 the result. Preserve returned `nextCursor` and pass it as `cursor` to fetch the
-next page. Present the exact prompt, allowed response shape or choices, request
-ID, run/workflow context, and deadline if present. If free-form text is allowed,
-preserve the user's meaning and show any consequential normalization before
-sending it.
+next page. A request with `inputSpec.schemaVersion` uses one of the four typed
+contracts: `multi_select`, `single_select`, `text`, or `boolean`. Immediately
+call `loomex_human_open` with that exact returned request and tell the user to
+complete the rendered side-panel form. Do not ask for the same values again in
+chat. An `inputSpec.collectionMode` of `batch` contains an ordered `questions`
+array; render it as one form and preserve that order in the submitted
+`answers[]`. The app submits the exact request ID through
+`loomex_human_respond`.
+
+For a legacy request without `inputSpec`, present the exact prompt, allowed
+response shape or choices, request ID, run/workflow context, and deadline if
+present. If free-form text is allowed, preserve the user's meaning and show any
+consequential normalization before sending it.
 
 Call `loomex_human_respond` only with the selected request ID as `requestId` and
 the user's answer in the public `response` field; optional `idempotencyKey` may

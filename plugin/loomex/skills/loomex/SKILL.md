@@ -61,8 +61,11 @@ Read every reference needed for the user's request before calling its tools.
    `spawn` requires a new sub-agent; `resume` requires the exact prior session
    ID and must never fall back to a replacement. Do not let the server AI
    substitute for this work.
-10. When a wait returns a human request or approval, present the exact prompt,
-   choices, consequences, and run context. Submit only the user's decision.
+10. When a wait returns a typed human request, call `loomex_human_open` with
+   the exact returned request so Codex opens the interactive side panel; do not
+   ask for the same values again in chat. For legacy human requests and policy
+   approvals, present the exact prompt, choices, consequences, and run context.
+   Submit only the user's decision.
 11. A closed Codex app cannot surface new prompts. The durable Runner keeps the
    run alive and the backend retains pending work. On reconnect, query the run
    and pending inboxes, and explain this boundary honestly.
@@ -87,7 +90,8 @@ Read every reference needed for the user's request before calling its tools.
   `loomex_workflow_run`
 - Runs: `loomex_run_list`, `loomex_run_get`, `loomex_run_wait`,
   `loomex_run_cancel`
-- Human requests: `loomex_human_list`, `loomex_human_respond`
+- Human requests: `loomex_human_list`, `loomex_human_open`,
+  `loomex_human_respond`
 - Approvals: `loomex_approval_list`, `loomex_approval_decide`
 - Plugin agent tasks: `loomex_agent_task_list`,
   `loomex_agent_task_respond`

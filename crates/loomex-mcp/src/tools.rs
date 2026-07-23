@@ -1,6 +1,8 @@
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
+pub const HUMAN_INPUT_APP_URI: &str = "ui://loomex/human-input/v1/form.html";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDefinition {
@@ -10,6 +12,8 @@ pub struct ToolDefinition {
     pub input_schema: Value,
     pub output_schema: Value,
     pub annotations: ToolAnnotations,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -315,11 +319,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
             ),
             open_ro(),
         ),
-        tool(
+        tool_with_meta(
             "loomex_human_respond",
             "Respond to human request",
             "Submit a durable response to a workflow human-in-the-loop request.",
-            "human.respond",
             obj(
                 &[
                     ("requestId", identifier()),
@@ -329,6 +332,26 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 &["requestId", "response"],
             ),
             mutating(false, true, true),
+            json!({
+                "ui": {
+                    "visibility": ["model", "app"]
+                }
+            }),
+        ),
+        tool_with_meta(
+            "loomex_human_open",
+            "Open human input",
+            "Open a Loomex human input request as an interactive side-panel form.",
+            obj(&[("humanRequest", any_value())], &["humanRequest"]),
+            open_ro(),
+            json!({
+                "ui": {
+                    "resourceUri": HUMAN_INPUT_APP_URI,
+                    "visibility": ["model"]
+                },
+                "openai/outputTemplate": HUMAN_INPUT_APP_URI,
+                "openai/widgetAccessible": true
+            }),
         ),
         tool(
             "loomex_agent_task_list",
@@ -476,6 +499,7 @@ pub fn route(name: &str) -> Option<ToolRoute> {
                 "loomex_run_cancel" => "run.cancel",
                 "loomex_human_list" => "human.list",
                 "loomex_human_respond" => "human.respond",
+                "loomex_human_open" => "human.open",
                 "loomex_agent_task_list" => "agent.list",
                 "loomex_agent_task_respond" => "agent.respond",
                 "loomex_approval_list" => "approval.list",
@@ -623,6 +647,26 @@ fn tool(
         input_schema,
         output_schema: output_schema(name),
         annotations,
+        meta: None,
+    }
+}
+
+fn tool_with_meta(
+    name: &'static str,
+    title: &'static str,
+    description: &'static str,
+    input_schema: Value,
+    annotations: ToolAnnotations,
+    meta: Value,
+) -> ToolDefinition {
+    ToolDefinition {
+        name,
+        title,
+        description,
+        input_schema,
+        output_schema: output_schema(name),
+        annotations,
+        meta: Some(meta),
     }
 }
 
@@ -933,6 +977,10 @@ fn output_data_schema(tool_name: &str) -> Value {
                 ],
             )
         }
+        "loomex_human_open" => evolvable_object(
+            &[("humanRequest", evolvable_object(&[], &[]))],
+            &["humanRequest"],
+        ),
         "loomex_runner_status" => evolvable_object(
             &[
                 ("running", boolean()),
@@ -1360,6 +1408,9 @@ mod tests {
             "loomex_human_respond" => {
                 json!({"requestId":"human-1","requestStatus":"resolved","executionId":"run-1","executionStatus":"running"})
             }
+            "loomex_human_open" => {
+                json!({"humanRequest":{"id":"human-1","status":"pending","title":"Review","description":"Please review","blocking":true}})
+            }
             "loomex_agent_task_list" => {
                 json!({"humanRequests":[{"id":"agent-1","status":"pending","title":"Run plugin agent task","description":"Execute in the current plugin host","blocking":true,"agentTask":{"schemaVersion":"loomex.plugin-agent-task/v1","executionStrategy":"plugin_host_sub_agent","provider":"plugin_host","model":"inherit","requestedProvider":"codex","requestedModel":"auto","prompt":"Summarize","input":{},"schemas":{},"instructions":{"strategy":"sub_agent","host":"current_plugin_host"}}}],"nextCursor":null})
             }
@@ -1407,13 +1458,39 @@ mod tests {
     #[test]
     fn every_tool_has_a_unique_route_and_strict_top_level_schema() {
         let definitions = definitions();
-        assert_eq!(definitions.len(), 32);
+        assert_eq!(definitions.len(), 33);
         let mut names = HashSet::new();
         for tool in definitions {
             assert!(names.insert(tool.name));
             assert_eq!(tool.input_schema["additionalProperties"], false);
             assert!(route(tool.name).is_some());
         }
+    }
+
+    #[test]
+    fn human_input_tools_publish_app_visibility_metadata() {
+        let definitions = definitions();
+        let open = definitions
+            .iter()
+            .find(|definition| definition.name == "loomex_human_open")
+            .unwrap();
+        let respond = definitions
+            .iter()
+            .find(|definition| definition.name == "loomex_human_respond")
+            .unwrap();
+
+        assert_eq!(
+            open.meta.as_ref().unwrap()["ui"]["resourceUri"],
+            HUMAN_INPUT_APP_URI
+        );
+        assert_eq!(
+            open.meta.as_ref().unwrap()["ui"]["visibility"],
+            json!(["model"])
+        );
+        assert_eq!(
+            respond.meta.as_ref().unwrap()["ui"]["visibility"],
+            json!(["model", "app"])
+        );
     }
 
     #[test]
