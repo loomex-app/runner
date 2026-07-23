@@ -17,6 +17,7 @@ pub const MCP_ENVELOPE_VERSION: &str = "loomex.mcp/v1";
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_APP_MIME_TYPE: &str = "text/html;profile=mcp-app";
 const HUMAN_INPUT_APP_HTML: &str = include_str!("human_input_app.html");
+const LIST_TABLE_APP_HTML: &str = include_str!("list_table_app.html");
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 static NEXT_ENVELOPE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -106,13 +107,22 @@ impl Server {
             ));
         }
         Ok(json!({
-            "resources": [{
-                "uri": tools::HUMAN_INPUT_APP_URI,
-                "name": "Loomex Human Input",
-                "title": "Loomex Human Input",
-                "description": "Interactive side-panel form for Loomex human input requests.",
-                "mimeType": MCP_APP_MIME_TYPE
-            }]
+            "resources": [
+                {
+                    "uri": tools::HUMAN_INPUT_APP_URI,
+                    "name": "Loomex Human Input",
+                    "title": "Loomex Human Input",
+                    "description": "Interactive side-panel form for Loomex human input requests.",
+                    "mimeType": MCP_APP_MIME_TYPE
+                },
+                {
+                    "uri": tools::LIST_TABLE_APP_URI,
+                    "name": "Loomex List Table",
+                    "title": "Loomex List Table",
+                    "description": "Interactive table for Loomex organizations, projects, and workflows.",
+                    "mimeType": MCP_APP_MIME_TYPE
+                }
+            ]
         }))
     }
 
@@ -128,18 +138,20 @@ impl Server {
             .get("uri")
             .and_then(Value::as_str)
             .ok_or_else(|| RpcError::invalid_params("resources/read.uri is required"))?;
-        if uri != tools::HUMAN_INPUT_APP_URI {
-            return Err(RpcError::invalid_params("unknown Loomex resource"));
-        }
+        let (text, resource_uri, prefers_border) = match uri {
+            tools::HUMAN_INPUT_APP_URI => (HUMAN_INPUT_APP_HTML, tools::HUMAN_INPUT_APP_URI, false),
+            tools::LIST_TABLE_APP_URI => (LIST_TABLE_APP_HTML, tools::LIST_TABLE_APP_URI, true),
+            _ => return Err(RpcError::invalid_params("unknown Loomex resource")),
+        };
         Ok(json!({
             "contents": [{
-                "uri": tools::HUMAN_INPUT_APP_URI,
+                "uri": resource_uri,
                 "mimeType": MCP_APP_MIME_TYPE,
-                "text": HUMAN_INPUT_APP_HTML,
+                "text": text,
                 "_meta": {
                     "ui": {
                         "csp": {"connectDomains": [], "resourceDomains": []},
-                        "prefersBorder": false
+                        "prefersBorder": prefers_border
                     }
                 }
             }]
@@ -502,6 +514,35 @@ mod tests {
         assert!(html.contains("boolean"));
         assert!(html.contains("question-card"));
         assert!(html.contains("answers"));
+    }
+
+    #[tokio::test]
+    async fn list_table_app_resource_is_advertised_and_readable() {
+        let list = server()
+            .handle(json!({"jsonrpc":"2.0", "id":1, "method":"resources/list", "params":{}}))
+            .await
+            .unwrap();
+        assert!(list["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|resource| resource["uri"] == tools::LIST_TABLE_APP_URI));
+
+        let read = server()
+            .handle(json!({
+                "jsonrpc":"2.0", "id":2, "method":"resources/read",
+                "params":{"uri":tools::LIST_TABLE_APP_URI}
+            }))
+            .await
+            .unwrap();
+        let content = &read["result"]["contents"][0];
+        assert_eq!(content["mimeType"], MCP_APP_MIME_TYPE);
+        let html = content["text"].as_str().unwrap();
+        assert!(html.contains("Loomex"));
+        assert!(html.contains("structuredContent"));
+        assert!(html.contains("loomex_org_select"));
+        assert!(html.contains("loomex_project_select"));
+        assert!(html.contains("ui/notifications/tool-result"));
     }
 
     #[tokio::test]
