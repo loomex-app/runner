@@ -123,6 +123,11 @@ Typical prompts:
 - `Wait for run 123 and show me any human requests.`
 - `Show pending Loomex approvals.`
 
+Typed Human Input requests open as an interactive Codex side panel. The panel
+renders the request's `multi_select`, `single_select`, `text`, or `boolean`
+contract and submits directly to the durable request; legacy human requests
+remain available through the chat-based response flow.
+
 Every tool publishes a tool-specific `outputSchema` and returns the same
 discriminated structured envelope. Successful calls have
 `{schemaVersion: "loomex.mcp/v1", ok: true, tool, data, meta}`; failed calls
@@ -210,7 +215,7 @@ This release-mode smoke installs `loomex@loomex` into a temporary, isolated
 `CODEX_HOME`, exercising the marketplace, plugin cache, `.mcp.json`, launcher,
 runtime manifest, platform selection, and checksum verification. It starts no
 model turn and calls no Loomex tool. It asserts the installed and MCP-advertised
-versions match the assembled manifest, and that Codex sees exactly 32 tools,
+versions match the assembled manifest, and that Codex sees exactly 33 tools,
 including setup, workflow discovery, and plugin agent-task tools.
 
 For a faster development-only check before assembling all native targets, pass

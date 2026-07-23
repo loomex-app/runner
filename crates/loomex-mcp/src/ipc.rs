@@ -543,10 +543,11 @@ mod tests {
         Bootstrap,
         Daemon,
         BootstrapFallback,
+        Local,
     }
 
     fn tool_contracts() -> Vec<(&'static str, &'static str, ExpectedTransport, Value)> {
-        use ExpectedTransport::{Bootstrap, BootstrapFallback, Daemon};
+        use ExpectedTransport::{Bootstrap, BootstrapFallback, Daemon, Local};
 
         vec![
             ("loomex_setup_status", "setup.status", Bootstrap, json!({})),
@@ -661,6 +662,12 @@ mod tests {
                 Daemon,
                 json!({"requestId": "request-1", "response": {"answer": "yes"}}),
             ),
+            (
+                "loomex_human_open",
+                "human.open",
+                Local,
+                json!({"humanRequest": {"id": "request-1"}}),
+            ),
             ("loomex_agent_task_list", "agent.list", Daemon, json!({})),
             (
                 "loomex_agent_task_respond",
@@ -707,7 +714,7 @@ mod tests {
         use std::collections::HashSet;
 
         let contracts = tool_contracts();
-        assert_eq!(contracts.len(), 32);
+        assert_eq!(contracts.len(), 33);
         let advertised = crate::tools::definitions();
         assert_eq!(advertised.len(), contracts.len());
         let expected_names = contracts
@@ -773,7 +780,10 @@ printf '{"schemaVersion":"loomex.cli.pluginControl/v1","method":"%s","result":{"
         );
 
         for (_, method, transport, arguments) in tool_contracts() {
-            if transport == ExpectedTransport::Daemon {
+            if !matches!(
+                transport,
+                ExpectedTransport::Bootstrap | ExpectedTransport::BootstrapFallback
+            ) {
                 continue;
             }
             let result = client
