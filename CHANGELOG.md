@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.12 - 2026-07-24
+
+- Split the Loomex Codex plugin into focused `setup`, `scope`, `workflow`,
+  `runs`, and `human` skills while retaining shared routing and safety rules.
+- Add dedicated guidance for organization/project selection and explicit local
+  workspace binding.
+
 ## 0.1.11 - 2026-07-23
 
 - Make plugin AI/person sub-agent continuity server-managed with explicit
