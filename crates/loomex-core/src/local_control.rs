@@ -238,6 +238,7 @@ impl<C: ManagementApiClient + Clone> LocalControlDispatcher<C> {
                 client.list_runner_workflows_filtered(
                     &self.credential,
                     optional_string(params, "projectId"),
+                    Some("plugin"),
                     optional_string(params, "query"),
                     optional_string(params, "cursor"),
                     params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize,
@@ -247,10 +248,11 @@ impl<C: ManagementApiClient + Clone> LocalControlDispatcher<C> {
                 let workflow_id = required_string(params, "workflowId")?;
                 let version = optional_string(params, "version");
                 self.with_client(|client| {
-                    serde_json::to_value(client.get_runner_workflow_input_schema(
+                    serde_json::to_value(client.get_runner_workflow_input_schema_scoped(
                         &self.credential,
                         workflow_id,
                         version,
+                        Some("plugin"),
                     )?)
                     .map_err(json_error)
                 })
@@ -271,6 +273,7 @@ impl<C: ManagementApiClient + Clone> LocalControlDispatcher<C> {
                             inputs,
                             session_id,
                             version,
+                            execution_mode: Some("plugin"),
                             idempotency_key,
                         },
                     )?)
@@ -284,9 +287,10 @@ impl<C: ManagementApiClient + Clone> LocalControlDispatcher<C> {
                 let workflow_id = required_string(params, "workflowId")?;
                 let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 200) as usize;
                 self.with_client(|client| {
-                    run_list_value(client.list_runner_workflow_executions_filtered(
+                    run_list_value(client.list_runner_workflow_executions_filtered_scoped(
                         &self.credential,
                         workflow_id,
+                        Some("plugin"),
                         optional_string(params, "status"),
                         optional_string(params, "cursor"),
                         limit,
@@ -299,11 +303,12 @@ impl<C: ManagementApiClient + Clone> LocalControlDispatcher<C> {
                 let reason = required_string(params, "reason")?;
                 let idempotency_key = required_string(params, "idempotencyKey")?;
                 self.with_client(|client| {
-                    let mut value = client.cancel_runner_workflow_execution_scoped(
+                    let mut value = client.cancel_runner_workflow_execution_mode_scoped(
                         &self.credential,
                         execution_id,
                         reason,
                         idempotency_key,
+                        Some("plugin"),
                     )?;
                     normalize_execution_field(&mut value);
                     Ok(value)
@@ -315,7 +320,7 @@ impl<C: ManagementApiClient + Clone> LocalControlDispatcher<C> {
                 let request_type = if method == "approval.list" {
                     Some("approval")
                 } else {
-                    optional_string(params, "requestType")
+                    optional_string(params, "requestType").or(Some("human"))
                 };
                 self.with_client(|client| {
                     let requests = client.list_human_requests_page(
@@ -338,6 +343,36 @@ impl<C: ManagementApiClient + Clone> LocalControlDispatcher<C> {
             "human.respond" | "approval.decide" => {
                 let request_id = required_string(params, "requestId")?;
                 let payload = human_resolution_payload(method, params)?;
+                self.with_client(|client| {
+                    human_resolution_value(client.resolve_human_request_idempotent(
+                        &self.credential,
+                        request_id,
+                        &payload,
+                        optional_string(params, "idempotencyKey"),
+                    )?)
+                })
+            }
+            "agent.list" => {
+                let workflow_id = optional_string(params, "workflowId").unwrap_or("");
+                let execution_id = optional_string(params, "executionId");
+                self.with_client(|client| {
+                    let requests = client.list_human_requests_page(
+                        &self.credential,
+                        &crate::RunnerHumanRequestListQuery {
+                            workflow_id,
+                            execution_id,
+                            request_type: Some("plugin_agent"),
+                            status: optional_string(params, "status"),
+                            cursor: optional_string(params, "cursor"),
+                            limit: params.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize,
+                        },
+                    )?;
+                    human_request_list_value(requests, false)
+                })
+            }
+            "agent.respond" => {
+                let request_id = required_string(params, "requestId")?;
+                let payload = human_resolution_payload("agent.respond", params)?;
                 self.with_client(|client| {
                     human_resolution_value(client.resolve_human_request_idempotent(
                         &self.credential,
@@ -564,7 +599,11 @@ impl<C: ManagementApiClient + Clone> LocalControlDispatcher<C> {
 
     fn get_run(&self, execution_id: &str) -> CoreResult<Value> {
         self.with_client(|client| {
-            run_detail_value(client.get_runner_workflow_execution(&self.credential, execution_id)?)
+            run_detail_value(client.get_runner_workflow_execution_scoped(
+                &self.credential,
+                execution_id,
+                Some("plugin"),
+            )?)
         })
     }
 
@@ -580,11 +619,12 @@ impl<C: ManagementApiClient + Clone> LocalControlDispatcher<C> {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         self.with_client(|client| {
-            let response = client.wait_runner_workflow_execution(
+            let response = client.wait_runner_workflow_execution_scoped(
                 &self.credential,
                 execution_id,
                 after_sequence,
                 timeout_seconds,
+                Some("plugin"),
             )?;
             run_detail_value(response)
         })
@@ -978,6 +1018,7 @@ fn human_resolution_payload(method: &str, params: &Value) -> CoreResult<Value> {
         return Ok(json!({
             "decision": required_string(params, "decision")?,
             "reason": optional_string(params, "reason"),
+            "requestType": "approval",
         }));
     }
     let response = params.get("payload").cloned().ok_or_else(|| {
@@ -989,7 +1030,12 @@ fn human_resolution_payload(method: &str, params: &Value) -> CoreResult<Value> {
     // The runner-control endpoint treats top-level `answer`, `response`, `payload`, and
     // `decision` keys as transport aliases. Always use an explicit answer envelope so an
     // arbitrary user object containing any of those keys survives unchanged.
-    Ok(json!({"answer": response}))
+    let request_type = if method == "agent.respond" {
+        "plugin_agent"
+    } else {
+        "human"
+    };
+    Ok(json!({"answer": response, "requestType": request_type}))
 }
 
 fn is_retryable_code(code: &str) -> bool {
@@ -1173,7 +1219,7 @@ mod tests {
             let params = json!({"requestId": "human-1", "payload": response.clone()});
             assert_eq!(
                 human_resolution_payload("human.respond", &params).unwrap(),
-                json!({"answer": response})
+                json!({"answer": response, "requestType": "human"})
             );
         }
     }
@@ -1187,7 +1233,20 @@ mod tests {
         });
         assert_eq!(
             human_resolution_payload("approval.decide", &params).unwrap(),
-            json!({"decision": "approve", "reason": "reviewed"})
+            json!({"decision": "approve", "reason": "reviewed", "requestType": "approval"})
+        );
+    }
+
+    #[test]
+    fn plugin_agent_response_uses_dedicated_backend_channel() {
+        let response = json!({
+            "status": "completed",
+            "output": {"response_text": "done"}
+        });
+        let params = json!({"requestId": "agent-1", "payload": response.clone()});
+        assert_eq!(
+            human_resolution_payload("agent.respond", &params).unwrap(),
+            json!({"answer": response, "requestType": "plugin_agent"})
         );
     }
 

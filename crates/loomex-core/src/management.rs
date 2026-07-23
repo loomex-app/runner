@@ -235,6 +235,7 @@ pub struct RunnerWorkflowExecutionStartOptions<'a> {
     pub inputs: Value,
     pub session_id: Option<&'a str>,
     pub version: Option<&'a str>,
+    pub execution_mode: Option<&'a str>,
     pub idempotency_key: &'a str,
 }
 
@@ -319,6 +320,21 @@ struct RunnerWorkflowListResponse {
     workflows: Vec<RunnerWorkflowSummary>,
 }
 
+fn runner_workflow_execution_mode(workflow: &RunnerWorkflowSummary) -> String {
+    let raw = workflow
+        .extra
+        .get("executionMode")
+        .or_else(|| workflow.extra.get("execution_mode"))
+        .and_then(Value::as_str)
+        .unwrap_or("app")
+        .trim();
+    match raw {
+        "local" | "local_runner" | "runner" => "app".to_string(),
+        "server" | "app" | "plugin" => raw.to_string(),
+        _ => "app".to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerHumanRequestListResponse {
@@ -337,6 +353,8 @@ struct RunnerWorkflowExecutionStartRequest {
     version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "bindingId")]
     binding_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "executionMode")]
+    execution_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1023,11 +1041,15 @@ pub trait ManagementApiClient {
         &mut self,
         credential: &ManagementCredential,
         _project_id: Option<&str>,
+        execution_mode: Option<&str>,
         query: Option<&str>,
         cursor: Option<&str>,
         limit: usize,
     ) -> CoreResult<Value> {
         let mut workflows = self.list_runner_workflows(credential)?;
+        if let Some(execution_mode) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            workflows.retain(|workflow| runner_workflow_execution_mode(workflow) == execution_mode);
+        }
         if let Some(query) = query.filter(|value| !value.trim().is_empty()) {
             let query = query.to_ascii_lowercase();
             workflows.retain(|workflow| {
@@ -1068,6 +1090,15 @@ pub trait ManagementApiClient {
             return Err(CoreError::new(
                 "RUNNER_BINDING_REQUIRED",
                 "bindingId is required for local workflow execution",
+            ));
+        }
+        if let Some(mode) = options
+            .execution_mode
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Err(CoreError::new(
+                "RUNNER_EXECUTION_MODE_UNSUPPORTED",
+                format!("management client does not support {mode} workflow execution"),
             ));
         }
         self.start_runner_workflow_execution(
@@ -1113,17 +1144,69 @@ pub trait ManagementApiClient {
             .then(|| (offset + response.executions.len()).to_string());
         Ok(response)
     }
+    fn list_runner_workflow_executions_filtered_scoped(
+        &mut self,
+        credential: &ManagementCredential,
+        workflow_id: &str,
+        execution_mode: Option<&str>,
+        status: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> CoreResult<RunnerWorkflowExecutionListResponse> {
+        if let Some(mode) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            return Err(CoreError::new(
+                "RUNNER_EXECUTION_MODE_UNSUPPORTED",
+                format!("management client does not support {mode} workflow execution lists"),
+            ));
+        }
+        self.list_runner_workflow_executions_filtered(
+            credential,
+            workflow_id,
+            status,
+            cursor,
+            limit,
+        )
+    }
     fn get_runner_workflow_input_schema(
         &mut self,
         credential: &ManagementCredential,
         workflow_id: &str,
         version: Option<&str>,
     ) -> CoreResult<RunnerWorkflowInputSchemaResponse>;
+    fn get_runner_workflow_input_schema_scoped(
+        &mut self,
+        credential: &ManagementCredential,
+        workflow_id: &str,
+        version: Option<&str>,
+        execution_mode: Option<&str>,
+    ) -> CoreResult<RunnerWorkflowInputSchemaResponse> {
+        if let Some(mode) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            return Err(CoreError::new(
+                "RUNNER_EXECUTION_MODE_UNSUPPORTED",
+                format!("management client does not support {mode} workflow schemas"),
+            ));
+        }
+        self.get_runner_workflow_input_schema(credential, workflow_id, version)
+    }
     fn get_runner_workflow_execution(
         &mut self,
         credential: &ManagementCredential,
         execution_id: &str,
     ) -> CoreResult<RunnerWorkflowExecutionResponse>;
+    fn get_runner_workflow_execution_scoped(
+        &mut self,
+        credential: &ManagementCredential,
+        execution_id: &str,
+        execution_mode: Option<&str>,
+    ) -> CoreResult<RunnerWorkflowExecutionResponse> {
+        if let Some(mode) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            return Err(CoreError::new(
+                "RUNNER_EXECUTION_MODE_UNSUPPORTED",
+                format!("management client does not support {mode} workflow execution details"),
+            ));
+        }
+        self.get_runner_workflow_execution(credential, execution_id)
+    }
     fn wait_runner_workflow_execution(
         &mut self,
         credential: &ManagementCredential,
@@ -1132,6 +1215,29 @@ pub trait ManagementApiClient {
         _timeout_seconds: u64,
     ) -> CoreResult<RunnerWorkflowExecutionResponse> {
         self.get_runner_workflow_execution(credential, execution_id)
+    }
+    fn wait_runner_workflow_execution_scoped(
+        &mut self,
+        credential: &ManagementCredential,
+        execution_id: &str,
+        after_sequence: u64,
+        timeout_seconds: u64,
+        execution_mode: Option<&str>,
+    ) -> CoreResult<RunnerWorkflowExecutionResponse> {
+        if let Some(mode) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            return Err(CoreError::new(
+                "RUNNER_EXECUTION_MODE_UNSUPPORTED",
+                format!(
+                    "management client does not support waiting for {mode} workflow executions"
+                ),
+            ));
+        }
+        self.wait_runner_workflow_execution(
+            credential,
+            execution_id,
+            after_sequence,
+            timeout_seconds,
+        )
     }
     fn cancel_runner_workflow_execution(
         &mut self,
@@ -1151,6 +1257,27 @@ pub trait ManagementApiClient {
         _idempotency_key: &str,
     ) -> CoreResult<Value> {
         self.cancel_runner_workflow_execution(credential, execution_id)
+    }
+    fn cancel_runner_workflow_execution_mode_scoped(
+        &mut self,
+        credential: &ManagementCredential,
+        execution_id: &str,
+        reason: &str,
+        idempotency_key: &str,
+        execution_mode: Option<&str>,
+    ) -> CoreResult<Value> {
+        if let Some(mode) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            return Err(CoreError::new(
+                "RUNNER_EXECUTION_MODE_UNSUPPORTED",
+                format!("management client does not support cancelling {mode} workflow executions"),
+            ));
+        }
+        self.cancel_runner_workflow_execution_scoped(
+            credential,
+            execution_id,
+            reason,
+            idempotency_key,
+        )
     }
     fn get_workflow_input_schema(
         &mut self,
@@ -1557,6 +1684,29 @@ impl ManagementApiClient for HttpManagementApiClient {
         Ok(envelope.data)
     }
 
+    fn get_runner_workflow_execution_scoped(
+        &mut self,
+        credential: &ManagementCredential,
+        execution_id: &str,
+        execution_mode: Option<&str>,
+    ) -> CoreResult<RunnerWorkflowExecutionResponse> {
+        let mut path = format!(
+            "/runner-control/runner/v1/executions/{}/",
+            encode_path(execution_id)
+        );
+        if let Some(mode) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            path.push_str("?executionMode=");
+            path.push_str(&encode_query(mode.trim()));
+        }
+        let response = self
+            .get_with_auth(&path, credential)
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerWorkflowExecutionResponse> =
+            parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
     fn list_projects(
         &mut self,
         credential: &ManagementCredential,
@@ -1872,6 +2022,7 @@ impl ManagementApiClient for HttpManagementApiClient {
         &mut self,
         credential: &ManagementCredential,
         project_id: Option<&str>,
+        execution_mode: Option<&str>,
         query: Option<&str>,
         cursor: Option<&str>,
         limit: usize,
@@ -1879,6 +2030,9 @@ impl ManagementApiClient for HttpManagementApiClient {
         let mut params = vec![format!("limit={}", limit.clamp(1, 200))];
         if let Some(value) = project_id.filter(|value| !value.trim().is_empty()) {
             params.push(format!("projectId={}", encode_query(value)));
+        }
+        if let Some(value) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            params.push(format!("executionMode={}", encode_query(value)));
         }
         if let Some(value) = query.filter(|value| !value.trim().is_empty()) {
             params.push(format!("query={}", encode_query(value)));
@@ -1910,6 +2064,7 @@ impl ManagementApiClient for HttpManagementApiClient {
             session_id: session_id.map(str::to_string),
             version: version.map(str::to_string),
             binding_id: None,
+            execution_mode: None,
         };
         let idempotency_key = default_runner_operation_idempotency_key(
             "workflow.run",
@@ -1952,6 +2107,7 @@ impl ManagementApiClient for HttpManagementApiClient {
                 session_id: options.session_id.map(str::to_string),
                 version: options.version.map(str::to_string),
                 binding_id: Some(options.binding_id.to_string()),
+                execution_mode: options.execution_mode.map(str::to_string),
             })
             .send()
             .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
@@ -1994,6 +2150,37 @@ impl ManagementApiClient for HttpManagementApiClient {
                     encode_path(execution_id),
                     after_sequence,
                     timeout_seconds.min(45),
+                ),
+                credential,
+            )
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerWorkflowExecutionResponse> =
+            parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
+    fn wait_runner_workflow_execution_scoped(
+        &mut self,
+        credential: &ManagementCredential,
+        execution_id: &str,
+        after_sequence: u64,
+        timeout_seconds: u64,
+        execution_mode: Option<&str>,
+    ) -> CoreResult<RunnerWorkflowExecutionResponse> {
+        let mut params = vec![
+            format!("afterSequence={after_sequence}"),
+            format!("timeoutSeconds={}", timeout_seconds.min(45)),
+        ];
+        if let Some(mode) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            params.push(format!("executionMode={}", encode_query(mode.trim())));
+        }
+        let response = self
+            .get_with_auth(
+                &format!(
+                    "/runner-control/runner/v1/executions/{}/?{}",
+                    encode_path(execution_id),
+                    params.join("&")
                 ),
                 credential,
             )
@@ -2061,6 +2248,41 @@ impl ManagementApiClient for HttpManagementApiClient {
         Ok(envelope.data)
     }
 
+    fn cancel_runner_workflow_execution_mode_scoped(
+        &mut self,
+        credential: &ManagementCredential,
+        execution_id: &str,
+        reason: &str,
+        idempotency_key: &str,
+        execution_mode: Option<&str>,
+    ) -> CoreResult<Value> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(CoreError::new(
+                "CANCELLATION_REASON_REQUIRED",
+                "cancellation reason is required",
+            ));
+        }
+        let idempotency_key = validate_runner_operation_idempotency_key(idempotency_key)?;
+        let response = self
+            .post_with_auth(
+                &format!(
+                    "/runner-control/runner/v1/executions/{}/cancel/",
+                    encode_path(execution_id)
+                ),
+                credential,
+            )
+            .header("Idempotency-Key", idempotency_key)
+            .json(&serde_json::json!({
+                "reason": reason,
+                "executionMode": execution_mode.filter(|value| !value.trim().is_empty()),
+            }))
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<Value> = parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
     fn list_runner_workflow_executions(
         &mut self,
         credential: &ManagementCredential,
@@ -2114,6 +2336,41 @@ impl ManagementApiClient for HttpManagementApiClient {
         Ok(envelope.data)
     }
 
+    fn list_runner_workflow_executions_filtered_scoped(
+        &mut self,
+        credential: &ManagementCredential,
+        workflow_id: &str,
+        execution_mode: Option<&str>,
+        status: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> CoreResult<RunnerWorkflowExecutionListResponse> {
+        let mut params = vec![format!("limit={}", limit.clamp(1, 200))];
+        if let Some(value) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            params.push(format!("executionMode={}", encode_query(value)));
+        }
+        if let Some(value) = status.filter(|value| !value.trim().is_empty()) {
+            params.push(format!("status={}", encode_query(value)));
+        }
+        if let Some(value) = cursor.filter(|value| !value.trim().is_empty()) {
+            params.push(format!("cursor={}", encode_query(value)));
+        }
+        let response = self
+            .get_with_auth(
+                &format!(
+                    "/runner-control/runner/v1/workflows/{}/executions/?{}",
+                    encode_path(workflow_id),
+                    params.join("&")
+                ),
+                credential,
+            )
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerWorkflowExecutionListResponse> =
+            parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
     fn get_runner_workflow_input_schema(
         &mut self,
         credential: &ManagementCredential,
@@ -2127,6 +2384,37 @@ impl ManagementApiClient for HttpManagementApiClient {
         if let Some(version) = version.filter(|value| !value.trim().is_empty()) {
             path.push_str("?version=");
             path.push_str(&encode_query(version.trim()));
+        }
+        let response = self
+            .get_with_auth(&path, credential)
+            .send()
+            .map_err(|err| CoreError::new("MANAGEMENT_HTTP_FAILED", err.to_string()))?;
+        let envelope: ClientEnvelope<RunnerWorkflowInputSchemaResponse> =
+            parse_json_response(response)?;
+        Ok(envelope.data)
+    }
+
+    fn get_runner_workflow_input_schema_scoped(
+        &mut self,
+        credential: &ManagementCredential,
+        workflow_id: &str,
+        version: Option<&str>,
+        execution_mode: Option<&str>,
+    ) -> CoreResult<RunnerWorkflowInputSchemaResponse> {
+        let mut params = Vec::new();
+        if let Some(version) = version.filter(|value| !value.trim().is_empty()) {
+            params.push(format!("version={}", encode_query(version.trim())));
+        }
+        if let Some(mode) = execution_mode.filter(|value| !value.trim().is_empty()) {
+            params.push(format!("executionMode={}", encode_query(mode.trim())));
+        }
+        let mut path = format!(
+            "/runner-control/runner/v1/workflows/{}/",
+            encode_path(workflow_id)
+        );
+        if !params.is_empty() {
+            path.push('?');
+            path.push_str(&params.join("&"));
         }
         let response = self
             .get_with_auth(&path, credential)
@@ -2999,6 +3287,7 @@ mod tests {
             .list_runner_workflows_filtered(
                 &credential,
                 Some("project-1"),
+                Some("plugin"),
                 Some("review me"),
                 Some("cursor-1"),
                 200,
@@ -3010,6 +3299,7 @@ mod tests {
         for query in [
             "limit=200",
             "projectId=project-1",
+            "executionMode=plugin",
             "query=review%20me",
             "cursor=cursor-1",
         ] {
@@ -3020,20 +3310,26 @@ mod tests {
             serve_one_http_response(r#"{"data":{"inputSchema":{"type":"object"}}}"#);
         let mut client = HttpManagementApiClient::new(server_url, None).unwrap();
         client
-            .get_runner_workflow_input_schema(&credential, "workflow / one", Some("version 2"))
+            .get_runner_workflow_input_schema_scoped(
+                &credential,
+                "workflow / one",
+                Some("version 2"),
+                Some("plugin"),
+            )
             .unwrap();
         let raw = captured_request(request, server);
         assert!(raw.starts_with(
-            "GET /api/v1/runner-control/runner/v1/workflows/workflow%20%2F%20one/?version=version%202 HTTP/1.1\r\n"
+            "GET /api/v1/runner-control/runner/v1/workflows/workflow%20%2F%20one/?version=version%202&executionMode=plugin HTTP/1.1\r\n"
         ));
 
         let (server_url, request, server) =
             serve_one_http_response(r#"{"data":{"executions":[],"nextCursor":"cursor-2"}}"#);
         let mut client = HttpManagementApiClient::new(server_url, None).unwrap();
         let page = client
-            .list_runner_workflow_executions_filtered(
+            .list_runner_workflow_executions_filtered_scoped(
                 &credential,
                 "workflow-1",
+                Some("plugin"),
                 Some("waiting_for_human"),
                 Some("cursor-1"),
                 200,
@@ -3043,18 +3339,23 @@ mod tests {
         assert_eq!(page.next_cursor.as_deref(), Some("cursor-2"));
         assert!(raw
             .starts_with("GET /api/v1/runner-control/runner/v1/workflows/workflow-1/executions/?"));
-        for query in ["limit=200", "status=waiting_for_human", "cursor=cursor-1"] {
+        for query in [
+            "limit=200",
+            "executionMode=plugin",
+            "status=waiting_for_human",
+            "cursor=cursor-1",
+        ] {
             assert!(raw.contains(query), "missing {query}: {raw}");
         }
 
         for (wait, expected_path) in [
             (
                 false,
-                "GET /api/v1/runner-control/runner/v1/executions/execution%20%2F%20one/ HTTP/1.1\r\n",
+                "GET /api/v1/runner-control/runner/v1/executions/execution%20%2F%20one/?executionMode=plugin HTTP/1.1\r\n",
             ),
             (
                 true,
-                "GET /api/v1/runner-control/runner/v1/executions/execution%20%2F%20one/?afterSequence=9&timeoutSeconds=45 HTTP/1.1\r\n",
+                "GET /api/v1/runner-control/runner/v1/executions/execution%20%2F%20one/?afterSequence=9&timeoutSeconds=45&executionMode=plugin HTTP/1.1\r\n",
             ),
         ] {
             let (server_url, request, server) = serve_one_http_response(
@@ -3063,16 +3364,21 @@ mod tests {
             let mut client = HttpManagementApiClient::new(server_url, None).unwrap();
             if wait {
                 client
-                    .wait_runner_workflow_execution(
+                    .wait_runner_workflow_execution_scoped(
                         &credential,
                         "execution / one",
                         9,
                         99,
+                        Some("plugin"),
                     )
                     .unwrap();
             } else {
                 client
-                    .get_runner_workflow_execution(&credential, "execution / one")
+                    .get_runner_workflow_execution_scoped(
+                        &credential,
+                        "execution / one",
+                        Some("plugin"),
+                    )
                     .unwrap();
             }
             let raw = captured_request(request, server);
@@ -3383,6 +3689,7 @@ mod tests {
                     inputs: json!({"prompt":"hello"}),
                     session_id: Some("session-1"),
                     version: Some("3"),
+                    execution_mode: Some("plugin"),
                     idempotency_key: "run-attempt-1",
                 },
             )
@@ -3397,6 +3704,7 @@ mod tests {
         assert!(raw_request.contains("\"bindingId\":\"binding-1\""));
         assert!(raw_request.contains("\"sessionId\":\"session-1\""));
         assert!(raw_request.contains("\"version\":\"3\""));
+        assert!(raw_request.contains("\"executionMode\":\"plugin\""));
         assert!(raw_request.contains("\"inputs\":{\"prompt\":\"hello\"}"));
     }
 
@@ -3408,11 +3716,12 @@ mod tests {
         let mut client = HttpManagementApiClient::new(server_url, None).unwrap();
 
         let response = client
-            .cancel_runner_workflow_execution_scoped(
+            .cancel_runner_workflow_execution_mode_scoped(
                 &test_credential("runner.secret"),
                 "run-1",
                 "No longer needed",
                 "cancel-attempt-1",
+                Some("plugin"),
             )
             .unwrap();
         let raw_request = request_receiver.recv().unwrap();
@@ -3423,6 +3732,7 @@ mod tests {
             .to_ascii_lowercase()
             .contains("idempotency-key: cancel-attempt-1\r\n"));
         assert!(raw_request.contains("\"reason\":\"No longer needed\""));
+        assert!(raw_request.contains("\"executionMode\":\"plugin\""));
     }
 
     #[test]

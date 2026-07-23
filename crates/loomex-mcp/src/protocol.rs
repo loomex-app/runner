@@ -172,7 +172,7 @@ fn normalize_daemon_arguments(tool: &str, mut arguments: Value) -> Value {
                 object.insert("localRootPath".to_string(), path);
             }
         }
-        "loomex_human_respond" => {
+        "loomex_human_respond" | "loomex_agent_task_respond" => {
             if let Some(response) = object.remove("response") {
                 object.insert("payload".to_string(), response);
             }
@@ -421,7 +421,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             list_response["result"]["tools"].as_array().unwrap().len(),
-            30
+            32
         );
         let null_metadata_response = server()
             .handle(json!({
@@ -510,6 +510,13 @@ mod tests {
                 json!({"requestId":"h","response":{"answer":"yes"}})
             ),
             json!({"requestId":"h","payload":{"answer":"yes"}})
+        );
+        assert_eq!(
+            normalize_daemon_arguments(
+                "loomex_agent_task_respond",
+                json!({"requestId":"a","response":{"status":"completed","output":{"answer":"yes"}}})
+            ),
+            json!({"requestId":"a","payload":{"status":"completed","output":{"answer":"yes"}}})
         );
         for response in [
             json!({"answer": {"value": 1}}),

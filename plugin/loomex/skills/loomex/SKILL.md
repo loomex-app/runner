@@ -1,6 +1,6 @@
 ---
 name: loomex
-description: Use Loomex from Codex to set up its durable local Runner, authenticate, select organizations and projects, bind local workspaces, browse and run workflows, follow long-running runs, respond to human-in-the-loop requests, decide approvals, inspect status and logs, or repair and roll back Runner setup.
+description: Use Loomex from Codex to set up its durable local Runner, authenticate, select organizations and projects, bind local workspaces, browse and run plugin workflows, follow long-running runs, execute plugin AI/person tasks, respond to human-in-the-loop requests, decide approvals, inspect status and logs, or repair and roll back Runner setup.
 ---
 
 # Loomex
@@ -48,16 +48,25 @@ Read every reference needed for the user's request before calling its tools.
    deferred or inactive pending auth/binding is not a reason to repair setup.
 5. Reuse the selected organization, project, and existing binding when they
    unambiguously match the current workspace. Never silently widen a binding.
-6. Before running, use `loomex_workflow_show` to confirm inputs and local
+6. `loomex_workflow_list` only returns workflows whose execution model is
+   `plugin`. App-only and server-only workflows are intentionally hidden from
+   the Codex plugin workflow picker.
+7. Before running, use `loomex_workflow_show` to confirm inputs and local
    capabilities when the workflow or parameters are ambiguous.
-7. Treat the ID returned by `loomex_workflow_run` as authoritative. Follow it
+8. Treat the ID returned by `loomex_workflow_run` as authoritative. Follow it
    with `loomex_run_wait`; do not run shell commands to imitate its nodes.
-8. When a wait returns a human request or approval, present the exact prompt,
+9. When a wait returns a plugin agent task, execute it on the local plugin host
+   according to its server-managed `agentTask.sessionDirective`, then submit
+   the result and actual `agentSession` with `loomex_agent_task_respond`.
+   `spawn` requires a new sub-agent; `resume` requires the exact prior session
+   ID and must never fall back to a replacement. Do not let the server AI
+   substitute for this work.
+10. When a wait returns a human request or approval, present the exact prompt,
    choices, consequences, and run context. Submit only the user's decision.
-9. A closed Codex app cannot surface new prompts. The durable Runner keeps the
+11. A closed Codex app cannot surface new prompts. The durable Runner keeps the
    run alive and the backend retains pending work. On reconnect, query the run
    and pending inboxes, and explain this boundary honestly.
-9. Treat retryable management or wait transport failures as unknown state, not
+12. Treat retryable management or wait transport failures as unknown state, not
    as evidence that the run survived, failed, or was cancelled. Recover with
    `loomex_run_get` using the authoritative execution ID, then use bounded
    `loomex_run_wait` calls. Do not recommend restarting the Runner unless
@@ -80,6 +89,8 @@ Read every reference needed for the user's request before calling its tools.
   `loomex_run_cancel`
 - Human requests: `loomex_human_list`, `loomex_human_respond`
 - Approvals: `loomex_approval_list`, `loomex_approval_decide`
+- Plugin agent tasks: `loomex_agent_task_list`,
+  `loomex_agent_task_respond`
 - Runner: `loomex_runner_status`, `loomex_runner_control`,
   `loomex_runner_doctor`, `loomex_runner_logs`
 
