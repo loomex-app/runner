@@ -1939,7 +1939,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "loomex-cli"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -1951,7 +1951,7 @@ dependencies = [
 
 [[package]]
 name = "loomex-core"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -1974,7 +1974,7 @@ dependencies = [
 
 [[package]]
 name = "loomex-mcp"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "libc",
  "serde",
@@ -1985,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "loomex-tauri"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "loomex-core",
  "serde",
