@@ -659,11 +659,11 @@ jobs:
           published="$(git -C "$GITHUB_WORKSPACE" ls-remote --heads origin "$publication_ref" | awk '{print $1}')"
           test "$published" = "$expected_commit"
           {
-            echo "Install this release by exact commit (not the publication branch):"
+            echo "Install this release with the verified local-snapshot installer:"
             echo '```bash'
-            echo "codex plugin marketplace add loomex-app/runner --ref $expected_commit"
-            echo "codex plugin add loomex@loomex"
+            echo "curl -fsSL https://github.com/loomex-app/runner/releases/download/v${{ needs.assemble.outputs.version }}/install-codex.sh | sh"
             echo '```'
+            echo "Marketplace publication commit for audit: $expected_commit"
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish-release-assets:

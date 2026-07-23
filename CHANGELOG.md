@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.9 - 2026-07-23
+
+- Install the signed Codex marketplace ZIP as a verified local snapshot during
+  the one-command installer flow, avoiding Codex's fixed Git clone timeout in
+  `plugin marketplace upgrade`.
+- Verify the marketplace ZIP with Sigstore in the bootstrap script and verify
+  its SHA-256 against signed provenance before registering it with Codex.
+- Keep the exact marketplace Git commit in provenance for reconstruction and
+  audit, while no longer requiring user installs to clone that commit.
+
 ## 0.1.8 - 2026-07-23
 
 - Recover retryable Runner management disconnects by re-reading durable run

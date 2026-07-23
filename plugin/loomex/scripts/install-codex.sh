@@ -103,11 +103,12 @@ chmod 400 "$trusted_root"
 
 installer="loomex-install-marketplace-$version.sh"
 provenance="loomex-codex-marketplace-$version.provenance.json"
-for name in "$installer" "$installer.sigstore.json" "$provenance" "$provenance.sigstore.json"; do
+marketplace_archive="loomex-codex-marketplace-$version.zip"
+for name in "$installer" "$installer.sigstore.json" "$provenance" "$provenance.sigstore.json" "$marketplace_archive" "$marketplace_archive.sigstore.json"; do
   download "$base/$name" "$temporary/$name"
 done
 chmod 500 "$temporary/$installer"
-chmod 400 "$temporary/$installer.sigstore.json" "$temporary/$provenance" "$temporary/$provenance.sigstore.json"
+chmod 400 "$temporary/$installer.sigstore.json" "$temporary/$provenance" "$temporary/$provenance.sigstore.json" "$temporary/$marketplace_archive" "$temporary/$marketplace_archive.sigstore.json"
 
 identity="https://github.com/$repository/.github/workflows/$workflow@refs/tags/v$version"
 "$cosign_bin" verify-blob \
@@ -122,6 +123,12 @@ identity="https://github.com/$repository/.github/workflows/$workflow@refs/tags/v
   --certificate-identity "$identity" \
   --certificate-oidc-issuer "$issuer" \
   "$temporary/$provenance" >/dev/null
+"$cosign_bin" verify-blob \
+  --bundle "$temporary/$marketplace_archive.sigstore.json" \
+  --trusted-root "$trusted_root" \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer "$issuer" \
+  "$temporary/$marketplace_archive" >/dev/null
 
 # The versioned installer performs the only Codex mutation. It snapshots the
 # previous marketplace/plugin state and restores it if any install step fails.
@@ -129,7 +136,7 @@ identity="https://github.com/$repository/.github/workflows/$workflow@refs/tags/v
   cd "$temporary"
   PATH="$(dirname "$cosign_bin"):$PATH" \
     LOOMEX_COSIGN_TRUSTED_ROOT="$trusted_root" \
-    "./$installer" "$version"
+    "./$installer" "$version" "$temporary/$marketplace_archive"
 )
 
 echo "Loomex Codex plugin $version is installed and enabled. Restart Codex or open a new task, then ask for any Loomex workflow naturally; Codex will automatically guide any required Runner setup, authentication, and workspace binding."
