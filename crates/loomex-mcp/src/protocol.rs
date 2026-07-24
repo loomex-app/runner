@@ -518,6 +518,9 @@ mod tests {
         assert!(html.contains("Review answers"));
         assert!(html.contains("sendFollowUpMessage"));
         assert!(html.contains("requiresReview"));
+        assert!(html.contains("question?.input_type"));
+        assert!(html.contains("updateOtherInput"));
+        assert!(html.contains("form.requestSubmit"));
     }
 
     #[tokio::test]

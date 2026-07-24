@@ -127,6 +127,7 @@
       let answers = [];
       let currentIndex = 0;
       let showingReview = false;
+      let activeRequestId = null;
 
       function toolOutput() {
         return window.openai?.toolOutput?.data || window.openai?.toolOutput || {};
@@ -162,6 +163,32 @@
         return isBatch() ? (spec().questions || []) : [spec()];
       }
 
+      function questionId(question, index) {
+        return String(question?.id ?? question?.questionId ?? question?.question_id ?? `question_${index + 1}`);
+      }
+
+      function questionType(question) {
+        return normalizeInputType(
+          question?.inputType ?? question?.input_type ?? question?.type ?? question?.kind ?? spec().inputType,
+        );
+      }
+
+      function questionPrompt(question, index) {
+        return question?.question ?? question?.questionText ?? question?.question_text ?? question?.text ?? `Question ${index + 1}`;
+      }
+
+      function questionOptionList(question) {
+        return question?.options ?? question?.choices ?? question?.values ?? [];
+      }
+
+      function questionAllowsOther(question) {
+        return question?.allowOther ?? question?.allow_other ?? true;
+      }
+
+      function questionOtherLabel(question) {
+        return question?.otherLabel ?? question?.other_label ?? "Other";
+      }
+
       function normalizedOption(option, index) {
         if (typeof option === "string" || typeof option === "number") {
           return { id: String(option), label: String(option) };
@@ -172,7 +199,7 @@
       }
 
       function normalizedOptions(question) {
-        return (question.options || []).map(normalizedOption);
+        return questionOptionList(question).map(normalizedOption);
       }
 
       function setStatus(message, error = false) {
@@ -188,15 +215,25 @@
       }
 
       function render(output = toolOutput()) {
-        humanRequest = normalizeRequest(output);
+        const nextRequest = normalizeRequest(output);
+        const requestChanged = activeRequestId !== nextRequest?.id;
+        if (requestChanged) {
+          answers = [];
+          currentIndex = 0;
+          showingReview = false;
+          activeRequestId = nextRequest?.id || null;
+        }
+        const previousAnswers = new Map(questions.map((question, index) => [questionId(question, index), answers[index]]));
+        humanRequest = nextRequest;
         const currentSpec = spec();
         document.querySelector("#title").textContent =
-          currentSpec.question || humanRequest.title || "Human input required";
+          questionPrompt(currentSpec, 0) || humanRequest.title || "Human input required";
         document.querySelector("#summary").textContent =
           humanRequest.description || humanRequest.context?.summary || "";
 
         questions = questionList();
-        if (!answers.length || answers.length !== questions.length) answers = questions.map(() => null);
+        answers = questions.map((question, index) => previousAnswers.get(questionId(question, index)) ?? answers[index] ?? null);
+        currentIndex = Math.min(currentIndex, Math.max(questions.length - 1, 0));
         const disabled = humanRequest.status === "resolved";
         if (disabled) showingReview = true;
         renderStep(disabled);
@@ -210,17 +247,27 @@
           ${showingReview ? `<button id="back" class="secondary" type="button">Back</button><button id="submit" type="submit" ${disabled ? "disabled" : ""}>${submitLabel}</button>` : singleQuestion ? `<span></span><button id="submit" type="submit" ${disabled ? "disabled" : ""}>${submitLabel}</button>` : `${currentIndex > 0 ? `<button id="back" class="secondary" type="button">Back</button>` : `<span></span>`}<button id="next" type="button">${currentIndex === questions.length - 1 ? "Review answers" : "Next"}</button>`}
         </div>`;
         if (showingReview) {
-          form.innerHTML = `<p class="progress">Review all answers before submitting.</p><section class="question-card"><ul class="review-list">${questions.map((question, index) => `<li class="review-item"><span class="review-question">${index + 1}. ${escapeHtml(question.question || `Question ${index + 1}`)}</span><span class="review-answer">${escapeHtml(answerLabel(question, answers[index]))}</span></li>`).join("")}</ul></section>${actions}`;
+          form.innerHTML = `<p class="progress">Review all answers before submitting.</p><section class="question-card"><ul class="review-list">${questions.map((question, index) => `<li class="review-item"><span class="review-question">${index + 1}. ${escapeHtml(questionPrompt(question, index))}</span><span class="review-answer">${escapeHtml(answerLabel(question, answers[index]))}</span></li>`).join("")}</ul></section>${actions}`;
         } else {
           const question = questions[currentIndex] || {};
           form.innerHTML = `<p class="progress">Question ${currentIndex + 1} of ${questions.length}</p><section class="question-card">
-            <div class="question-head"><span class="question-number">${currentIndex + 1}</span><h2 class="question-title">${escapeHtml(question.question || `Question ${currentIndex + 1}`)}</h2></div>
+            <div class="question-head"><span class="question-number">${currentIndex + 1}</span><h2 class="question-title">${escapeHtml(questionPrompt(question, currentIndex))}</h2></div>
             <div class="question-controls">${questionControls(question, currentIndex, disabled)}</div>
           </section>${actions}`;
           restoreAnswer(question, currentIndex);
           form.querySelectorAll(`input[name="value-${currentIndex}"]`).forEach((input) => input.addEventListener("change", () => {
-            if (requiresReview() && normalizeInputType(question.inputType) !== "multi_select" && input.value !== "other") setTimeout(() => void advance(), 120);
+            updateOtherInput(question, currentIndex, disabled);
+            if (requiresReview() && questionType(question) !== "multi_select" && input.value !== "other") setTimeout(() => void advance(), 120);
           }));
+          updateOtherInput(question, currentIndex, disabled);
+          if (questions.length === 1 && questionType(question) === "text") {
+            form.querySelector(`#answer-${currentIndex}`)?.addEventListener("keydown", (event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                form.requestSubmit();
+              }
+            });
+          }
         }
         document.querySelector("#expand").addEventListener("click", () => void requestSidePanel());
         document.querySelector("#back")?.addEventListener("click", () => {
@@ -232,7 +279,7 @@
       }
 
       function questionControls(question, index, disabled) {
-        const type = normalizeInputType(question.inputType);
+        const type = questionType(question);
         const name = `value-${index}`;
         if (type === "text") {
           return `<textarea id="answer-${index}" required placeholder="Type your answer" ${disabled ? "disabled" : ""}></textarea>`;
@@ -248,11 +295,20 @@
         for (const [optionIndex, option] of normalizedOptions(question).entries()) {
           controls.push(optionHtml(option.id, option.label, controlType, name, disabled, optionIndex));
         }
-        if (question.allowOther !== false) {
-          controls.push(optionHtml("other", question.otherLabel || "Other", controlType, name, disabled));
-          controls.push(`<input id="otherText-${index}" type="text" placeholder="Type other answer" ${disabled ? "disabled" : ""} />`);
+        if (questionAllowsOther(question) !== false) {
+          controls.push(optionHtml("other", questionOtherLabel(question), controlType, name, disabled, normalizedOptions(question).length));
+          controls.push(`<input id="otherText-${index}" type="text" placeholder="Type other answer" hidden ${disabled ? "disabled" : ""} />`);
         }
         return controls.join("");
+      }
+
+      function updateOtherInput(question, index, disabled) {
+        const other = document.querySelector(`#otherText-${index}`);
+        if (!other) return;
+        const selected = [...document.querySelectorAll(`input[name="value-${index}"]:checked`)].some((input) => input.value === "other");
+        other.hidden = !selected;
+        other.disabled = disabled || !selected;
+        if (!selected) other.value = "";
       }
 
       function optionHtml(value, label, type, name, disabled, index = 0) {
@@ -265,7 +321,7 @@
       function restoreAnswer(question, index) {
         const answer = answers[index];
         if (!answer) return;
-        const type = normalizeInputType(question.inputType);
+        const type = questionType(question);
         if (type === "text") document.querySelector(`#answer-${index}`).value = answer.value || "";
         const values = type === "multi_select" ? (answer.values || []) : [answer.value];
         values.filter((value) => value !== undefined).forEach((value) => {
@@ -287,18 +343,21 @@
       }
 
       function answerPayload() {
-        return {
+        const payload = {
           answers: questions.map((question, index) => ({
-            questionId: question.id || `question_${index + 1}`,
+            questionId: questionId(question, index),
             ...(answers[index] || {}),
           })),
         };
+        if (spec().schemaVersion) payload.schemaVersion = spec().schemaVersion;
+        if (spec().collectionMode) payload.collectionMode = spec().collectionMode;
+        return payload;
       }
 
       function answerLabel(question, answer) {
         if (!answer) return "Not answered";
-        if (normalizeInputType(question.inputType) === "text") return answer.value || "—";
-        const values = normalizeInputType(question.inputType) === "multi_select" ? (answer.values || []) : [answer.value];
+        if (questionType(question) === "text") return answer.value || "—";
+        const values = questionType(question) === "multi_select" ? (answer.values || []) : [answer.value];
         const labels = values.map((value) => normalizedOptions(question).find((option) => option.id === String(value))?.label || (value === "true" ? "True" : value === "false" ? "False" : value));
         if (answer.otherText) labels.push(`Other: ${answer.otherText}`);
         return labels.join(", ") || "—";
@@ -320,7 +379,7 @@
       }
 
       function answerForQuestion(question, index) {
-        const type = normalizeInputType(question.inputType);
+        const type = questionType(question);
         const name = `value-${index}`;
         if (type === "text") {
           const value = document.querySelector(`#answer-${index}`)?.value.trim() || "";
