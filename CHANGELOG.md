@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.19 - 2026-07-24
+
+- Fix typed human-input submissions to always send the backend-compatible
+  `answers[]` payload.
+- Keep single-question forms on one submit step and keep the interactive form
+  inline until the user submits, then continue the workflow automatically.
+
 ## 0.1.18 - 2026-07-24
 
 - Add padded, metric-rich workflow list tables with node and execution counts.

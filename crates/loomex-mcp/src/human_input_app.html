@@ -154,6 +154,10 @@
         return spec().collectionMode === "batch" || Array.isArray(spec().questions);
       }
 
+      function requiresReview() {
+        return questions.length > 1;
+      }
+
       function questionList() {
         return isBatch() ? (spec().questions || []) : [spec()];
       }
@@ -199,9 +203,11 @@
       }
 
       function renderStep(disabled = false) {
+        const singleQuestion = !requiresReview();
+        const submitLabel = singleQuestion ? "Submit" : "Submit & Resume";
         const actions = `<div class="actions">
           <button id="expand" class="secondary" type="button">Open in side panel</button>
-          ${showingReview ? `<button id="back" class="secondary" type="button">Back</button><button id="submit" type="submit" ${disabled ? "disabled" : ""}>Submit & Resume</button>` : `${currentIndex > 0 ? `<button id="back" class="secondary" type="button">Back</button>` : `<span></span>`}<button id="next" type="button">${currentIndex === questions.length - 1 ? "Review answers" : "Next"}</button>`}
+          ${showingReview ? `<button id="back" class="secondary" type="button">Back</button><button id="submit" type="submit" ${disabled ? "disabled" : ""}>${submitLabel}</button>` : singleQuestion ? `<span></span><button id="submit" type="submit" ${disabled ? "disabled" : ""}>${submitLabel}</button>` : `${currentIndex > 0 ? `<button id="back" class="secondary" type="button">Back</button>` : `<span></span>`}<button id="next" type="button">${currentIndex === questions.length - 1 ? "Review answers" : "Next"}</button>`}
         </div>`;
         if (showingReview) {
           form.innerHTML = `<p class="progress">Review all answers before submitting.</p><section class="question-card"><ul class="review-list">${questions.map((question, index) => `<li class="review-item"><span class="review-question">${index + 1}. ${escapeHtml(question.question || `Question ${index + 1}`)}</span><span class="review-answer">${escapeHtml(answerLabel(question, answers[index]))}</span></li>`).join("")}</ul></section>${actions}`;
@@ -213,7 +219,7 @@
           </section>${actions}`;
           restoreAnswer(question, currentIndex);
           form.querySelectorAll(`input[name="value-${currentIndex}"]`).forEach((input) => input.addEventListener("change", () => {
-            if (normalizeInputType(question.inputType) !== "multi_select" && input.value !== "other") setTimeout(() => void advance(), 120);
+            if (requiresReview() && normalizeInputType(question.inputType) !== "multi_select" && input.value !== "other") setTimeout(() => void advance(), 120);
           }));
         }
         document.querySelector("#expand").addEventListener("click", () => void requestSidePanel());
@@ -281,15 +287,12 @@
       }
 
       function answerPayload() {
-        if (questions.length > 1) {
-          return {
-            answers: questions.map((question, index) => ({
-              questionId: question.id || `question_${index + 1}`,
-              ...(answers[index] || {}),
-            })),
-          };
-        }
-        return answers[0] || {};
+        return {
+          answers: questions.map((question, index) => ({
+            questionId: question.id || `question_${index + 1}`,
+            ...(answers[index] || {}),
+          })),
+        };
       }
 
       function answerLabel(question, answer) {
@@ -337,7 +340,6 @@
       }
 
       render();
-      void requestSidePanel();
 
       window.addEventListener("openai:set_globals", (event) => {
         const output = event.detail?.globals?.toolOutput;
@@ -355,6 +357,7 @@
         submit.disabled = true;
         submit.textContent = "Submitting...";
         try {
+          if (!showingReview) captureCurrent();
           const result = await window.openai.callTool("loomex_human_respond", {
             requestId: humanRequest.id,
             response: answerPayload(),

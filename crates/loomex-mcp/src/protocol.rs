@@ -517,6 +517,7 @@ mod tests {
         assert!(html.contains("normalizedOption"));
         assert!(html.contains("Review answers"));
         assert!(html.contains("sendFollowUpMessage"));
+        assert!(html.contains("requiresReview"));
     }
 
     #[tokio::test]
