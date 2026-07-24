@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.18 - 2026-07-24
+
+- Add padded, metric-rich workflow list tables with node and execution counts.
+- Make human input a resumable one-question-at-a-time review flow with working
+  radio/checkbox options, back navigation, summary confirmation, and automatic
+  workflow continuation after submission.
+
 ## 0.1.17 - 2026-07-24
 
 - Make Cosign downloads resumable across installer invocations.
