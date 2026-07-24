@@ -78,14 +78,24 @@ download() {
   label=$1
   url=$2
   destination=$3
-  partial="$destination.partial"
-  rm -f -- "$partial" "$destination"
+  partial=${4:-"$destination.partial"}
+  preserve_partial=${5:-0}
+  if test "$preserve_partial" -eq 1; then
+    if test -L "$partial"; then
+      rm -f -- "$partial"
+    fi
+  else
+    rm -f -- "$partial" "$destination"
+  fi
   step "Downloading $label"
+  if test "$preserve_partial" -eq 1 && test -s "$partial"; then
+    step "Resuming partial $label download"
+  fi
   attempt=1
   while :; do
     if curl --fail --location --progress-bar \
-      --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 600 \
-      --retry 2 --retry-all-errors --continue-at - \
+      --http1.1 --proto '=https' --tlsv1.2 --connect-timeout 30 --max-time 1800 \
+      --retry 2 --retry-delay 2 --retry-max-time 7200 --retry-all-errors --continue-at - \
       --output "$partial" "$url"; then
       break
     else
@@ -127,10 +137,14 @@ else
     rm -f -- "$cosign_cached"
   fi
   cosign_download="$temporary/$cosign_name"
-  download "Cosign verifier" "https://github.com/sigstore/cosign/releases/download/v$cosign_version/$cosign_name" "$cosign_download"
-  test "$(sha256_file "$cosign_download")" = "$cosign_sha256" || fail "downloaded Cosign checksum did not match the pinned official release"
-  chmod 700 "$cosign_download"
   mkdir -p "$cosign_cache_dir"
+  cosign_partial="$cosign_cached.partial"
+  download "Cosign verifier" "https://github.com/sigstore/cosign/releases/download/v$cosign_version/$cosign_name" "$cosign_download" "$cosign_partial" 1
+  if test "$(sha256_file "$cosign_download")" != "$cosign_sha256"; then
+    rm -f -- "$cosign_partial"
+    fail "downloaded Cosign checksum did not match the pinned official release"
+  fi
+  chmod 700 "$cosign_download"
   mv -- "$cosign_download" "$cosign_cached"
   cosign_bin="$cosign_cached"
   step "Verified and cached Cosign checksum"
