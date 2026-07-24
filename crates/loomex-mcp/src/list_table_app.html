@@ -12,7 +12,7 @@
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        padding: 18px;
+        padding: 28px 30px 32px;
         color: light-dark(#171821, #f6f7fb);
         background: light-dark(#f7f8fb, #14151a);
       }
@@ -34,7 +34,7 @@
       input:focus { border-color: #14b8a6; box-shadow: 0 0 0 3px color-mix(in srgb, #14b8a6 18%, transparent); }
       .count { margin-left: auto; color: light-dark(#707180, #9698a5); font-size: 12px; white-space: nowrap; }
       .table-wrap { overflow-x: auto; border: 1px solid light-dark(#dfe2ea, #343743); border-radius: 14px; background: light-dark(#fff, #1a1c23); }
-      table { width: 100%; border-collapse: collapse; min-width: 560px; }
+      table { width: 100%; border-collapse: collapse; min-width: 680px; }
       th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid light-dark(#eceef3, #2b2d36); vertical-align: middle; }
       th { color: light-dark(#737583, #a4a6b2); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; }
       tr:last-child td { border-bottom: 0; }
@@ -42,6 +42,7 @@
       td:first-child { color: light-dark(#242631, #f4f5fa); font-weight: 700; }
       .muted { color: light-dark(#777989, #9b9daa); font-weight: 400; }
       .id { color: light-dark(#777989, #9b9daa); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+      .metric { color: light-dark(#303341, #f0f1f7); font-variant-numeric: tabular-nums; font-weight: 700; }
       button { border: 0; border-radius: 8px; padding: 7px 10px; color: #07110f; background: #14f1d6; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; white-space: nowrap; }
       button:disabled { cursor: progress; opacity: .6; }
       .state { padding: 36px 18px; color: light-dark(#707180, #a4a6b2); text-align: center; }
@@ -112,7 +113,7 @@
       }
 
       function columnsFor(kind) {
-        if (kind === "workflows") return [["name", "Name"], ["description", "Description"], ["executionModel", "Execution"], ["version", "Version"]];
+        if (kind === "workflows") return [["name", "Name"], ["nodeCount", "Nodes"], ["executionCount", "Executions"]];
         if (kind === "organizations") return [["name", "Name"], ["slug", "Slug"], ["id", "ID"]];
         if (kind === "projects") return [["name", "Name"], ["slug", "Slug"], ["id", "ID"]];
         return [["name", "Name"], ["id", "ID"]];
@@ -122,6 +123,16 @@
         if (value === null || value === undefined || value === "") return "—";
         if (typeof value === "object") return JSON.stringify(value);
         return String(value);
+      }
+
+      function columnValue(row, key) {
+        if (key === "nodeCount") {
+          return row.nodeCount ?? row.nodesCount ?? row.node_count ?? row.nodes_count ?? (Array.isArray(row.nodes) ? row.nodes.length : row.definition?.nodes?.length);
+        }
+        if (key === "executionCount") {
+          return row.executionCount ?? row.executionsCount ?? row.runCount ?? row.execution_count ?? row.executions_count ?? row.run_count ?? (Array.isArray(row.executions) ? row.executions.length : undefined);
+        }
+        return row[key];
       }
 
       function escapeHtml(value) {
@@ -172,8 +183,8 @@
         countEl.textContent = `${filtered.length} of ${rows.length}`;
         bodyEl.innerHTML = filtered.map((row) => {
           const cells = columns.map(([key]) => {
-            const value = display(row[key]);
-            const className = key === "id" ? " class=\"id\"" : key === "description" ? " class=\"muted\"" : "";
+            const value = display(columnValue(row, key));
+            const className = key === "id" ? " class=\"id\"" : key === "description" ? " class=\"muted\"" : key === "nodeCount" || key === "executionCount" ? " class=\"metric\"" : "";
             return `<td${className}>${escapeHtml(value)}</td>`;
           }).join("");
           const action = actionFor(row);

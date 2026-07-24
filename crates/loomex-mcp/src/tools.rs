@@ -1119,7 +1119,15 @@ fn workspace_schema() -> Value {
 }
 
 fn workflow_schema() -> Value {
-    evolvable_object(&[("id", identifier()), ("name", string())], &["id"])
+    evolvable_object(
+        &[
+            ("id", identifier()),
+            ("name", string()),
+            ("nodeCount", nonnegative_integer()),
+            ("executionCount", nonnegative_integer()),
+        ],
+        &["id"],
+    )
 }
 
 fn execution_schema() -> Value {

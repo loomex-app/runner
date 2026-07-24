@@ -514,6 +514,9 @@ mod tests {
         assert!(html.contains("boolean"));
         assert!(html.contains("question-card"));
         assert!(html.contains("answers"));
+        assert!(html.contains("normalizedOption"));
+        assert!(html.contains("Review answers"));
+        assert!(html.contains("sendFollowUpMessage"));
     }
 
     #[tokio::test]
@@ -543,6 +546,8 @@ mod tests {
         assert!(html.contains("loomex_org_select"));
         assert!(html.contains("loomex_project_select"));
         assert!(html.contains("ui/notifications/tool-result"));
+        assert!(html.contains("nodeCount"));
+        assert!(html.contains("executionCount"));
     }
 
     #[tokio::test]
