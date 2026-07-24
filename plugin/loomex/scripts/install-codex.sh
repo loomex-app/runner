@@ -24,7 +24,7 @@ step() {
   echo "loomex installer: $*" >&2
 }
 
-for dependency in curl codex git python3 uname mktemp chmod awk dirname rm mv; do
+for dependency in curl codex git python3 uname mktemp chmod awk dirname rm mv mkdir; do
   command -v "$dependency" >/dev/null 2>&1 || fail "required command not found: $dependency"
 done
 python3 - "$version" <<'PY' || fail "release asset contains an invalid embedded version"
@@ -112,13 +112,29 @@ sha256_file() {
   fi
 }
 
-cosign_bin="$temporary/cosign"
 cosign_name="cosign-$cosign_os-$cosign_arch"
 step "Preparing secure installer for $os/$arch"
-download "Cosign verifier" "https://github.com/sigstore/cosign/releases/download/v$cosign_version/$cosign_name" "$cosign_bin"
-test "$(sha256_file "$cosign_bin")" = "$cosign_sha256" || fail "downloaded Cosign checksum did not match the pinned official release"
-chmod 700 "$cosign_bin"
-step "Verified Cosign checksum"
+cache_root=${XDG_CACHE_HOME:-${HOME:-$temporary/.cache}}
+cosign_cache_dir="$cache_root/loomex/cosign/$cosign_version"
+cosign_cached="$cosign_cache_dir/$cosign_name"
+if test -f "$cosign_cached" && test ! -L "$cosign_cached" && test -x "$cosign_cached" \
+  && test "$(sha256_file "$cosign_cached")" = "$cosign_sha256"; then
+  cosign_bin="$cosign_cached"
+  step "Reusing verified Cosign verifier from cache"
+else
+  if test -e "$cosign_cached" || test -L "$cosign_cached"; then
+    step "Ignoring invalid or stale cached Cosign verifier"
+    rm -f -- "$cosign_cached"
+  fi
+  cosign_download="$temporary/$cosign_name"
+  download "Cosign verifier" "https://github.com/sigstore/cosign/releases/download/v$cosign_version/$cosign_name" "$cosign_download"
+  test "$(sha256_file "$cosign_download")" = "$cosign_sha256" || fail "downloaded Cosign checksum did not match the pinned official release"
+  chmod 700 "$cosign_download"
+  mkdir -p "$cosign_cache_dir"
+  mv -- "$cosign_download" "$cosign_cached"
+  cosign_bin="$cosign_cached"
+  step "Verified and cached Cosign checksum"
+fi
 
 trusted_root="$temporary/trusted_root.json"
 download "Sigstore trusted root" "$sigstore_root_url" "$trusted_root"
