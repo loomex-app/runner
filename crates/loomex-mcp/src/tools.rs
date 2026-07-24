@@ -336,7 +336,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
             json!({
                 "ui": {
                     "visibility": ["model", "app"]
-                }
+                },
+                "openai/widgetAccessible": true
             }),
         ),
         tool_with_meta(
