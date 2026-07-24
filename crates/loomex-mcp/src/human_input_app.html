@@ -12,7 +12,7 @@
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        padding: 22px;
+        padding: 28px 30px 32px;
         color: light-dark(#16161d, #f7f7fb);
         background: light-dark(#f7f8fb, #14151a);
       }
@@ -75,6 +75,11 @@
       }
       .question-title { margin: 3px 0 0; font-size: 15px; line-height: 1.4; }
       .question-controls { display: grid; gap: 10px; }
+      .progress { margin: 0 0 14px; color: light-dark(#777989, #9b9daa); font-size: 12px; }
+      .review-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+      .review-item { border: 1px solid light-dark(#dfe2ea, #343743); border-radius: 11px; padding: 12px; background: light-dark(#fff, #1d1f27); }
+      .review-question { display: block; margin-bottom: 5px; color: light-dark(#5e6070, #a9aab5); font-size: 12px; }
+      .review-answer { display: block; line-height: 1.45; }
       .actions { display: flex; justify-content: space-between; gap: 10px; padding-top: 4px; }
       button {
         border: 0;
@@ -118,6 +123,10 @@
       const form = document.querySelector("#form");
       const statusEl = document.querySelector("#status");
       let humanRequest = null;
+      let questions = [];
+      let answers = [];
+      let currentIndex = 0;
+      let showingReview = false;
 
       function toolOutput() {
         return window.openai?.toolOutput?.data || window.openai?.toolOutput || {};
@@ -145,6 +154,23 @@
         return spec().collectionMode === "batch" || Array.isArray(spec().questions);
       }
 
+      function questionList() {
+        return isBatch() ? (spec().questions || []) : [spec()];
+      }
+
+      function normalizedOption(option, index) {
+        if (typeof option === "string" || typeof option === "number") {
+          return { id: String(option), label: String(option) };
+        }
+        const id = option?.id ?? option?.value ?? option?.key ?? `option_${index + 1}`;
+        const label = option?.label ?? option?.title ?? option?.name ?? option?.value ?? id;
+        return { id: String(id), label: String(label) };
+      }
+
+      function normalizedOptions(question) {
+        return (question.options || []).map(normalizedOption);
+      }
+
       function setStatus(message, error = false) {
         statusEl.textContent = message;
         statusEl.className = error ? "status error" : "status";
@@ -165,29 +191,38 @@
         document.querySelector("#summary").textContent =
           humanRequest.description || humanRequest.context?.summary || "";
 
+        questions = questionList();
+        if (!answers.length || answers.length !== questions.length) answers = questions.map(() => null);
         const disabled = humanRequest.status === "resolved";
-        const controls = [];
-        if (isBatch()) {
-          for (const [index, question] of (currentSpec.questions || []).entries()) {
-            controls.push(`<section class="question-card">
-              <div class="question-head">
-                <span class="question-number">${index + 1}</span>
-                <h2 class="question-title">${escapeHtml(question.question)}</h2>
-              </div>
-              <div class="question-controls">${questionControls(question, index, disabled)}</div>
-            </section>`);
-          }
+        if (disabled) showingReview = true;
+        renderStep(disabled);
+      }
+
+      function renderStep(disabled = false) {
+        const actions = `<div class="actions">
+          <button id="expand" class="secondary" type="button">Open in side panel</button>
+          ${showingReview ? `<button id="back" class="secondary" type="button">Back</button><button id="submit" type="submit" ${disabled ? "disabled" : ""}>Submit & Resume</button>` : `${currentIndex > 0 ? `<button id="back" class="secondary" type="button">Back</button>` : `<span></span>`}<button id="next" type="button">${currentIndex === questions.length - 1 ? "Review answers" : "Next"}</button>`}
+        </div>`;
+        if (showingReview) {
+          form.innerHTML = `<p class="progress">Review all answers before submitting.</p><section class="question-card"><ul class="review-list">${questions.map((question, index) => `<li class="review-item"><span class="review-question">${index + 1}. ${escapeHtml(question.question || `Question ${index + 1}`)}</span><span class="review-answer">${escapeHtml(answerLabel(question, answers[index]))}</span></li>`).join("")}</ul></section>${actions}`;
         } else {
-          controls.push(questionControls(currentSpec, 0, disabled));
+          const question = questions[currentIndex] || {};
+          form.innerHTML = `<p class="progress">Question ${currentIndex + 1} of ${questions.length}</p><section class="question-card">
+            <div class="question-head"><span class="question-number">${currentIndex + 1}</span><h2 class="question-title">${escapeHtml(question.question || `Question ${currentIndex + 1}`)}</h2></div>
+            <div class="question-controls">${questionControls(question, currentIndex, disabled)}</div>
+          </section>${actions}`;
+          restoreAnswer(question, currentIndex);
+          form.querySelectorAll(`input[name="value-${currentIndex}"]`).forEach((input) => input.addEventListener("change", () => {
+            if (normalizeInputType(question.inputType) !== "multi_select" && input.value !== "other") setTimeout(() => void advance(), 120);
+          }));
         }
-
-        form.innerHTML = controls.join("") + `
-          <div class="actions">
-            <button id="expand" class="secondary" type="button">Open in side panel</button>
-            <button id="submit" type="submit" ${disabled ? "disabled" : ""}>Submit & Resume</button>
-          </div>`;
-
         document.querySelector("#expand").addEventListener("click", () => void requestSidePanel());
+        document.querySelector("#back")?.addEventListener("click", () => {
+          if (showingReview) showingReview = false;
+          currentIndex = Math.max(0, currentIndex - 1);
+          renderStep(disabled);
+        });
+        document.querySelector("#next")?.addEventListener("click", () => void advance());
       }
 
       function questionControls(question, index, disabled) {
@@ -204,8 +239,8 @@
         }
         const controls = [];
         const controlType = type === "multi_select" ? "checkbox" : "radio";
-        for (const option of (question.options || []).slice(0, 4)) {
-          controls.push(optionHtml(option.id, option.label, controlType, name, disabled));
+        for (const [optionIndex, option] of normalizedOptions(question).entries()) {
+          controls.push(optionHtml(option.id, option.label, controlType, name, disabled, optionIndex));
         }
         if (question.allowOther !== false) {
           controls.push(optionHtml("other", question.otherLabel || "Other", controlType, name, disabled));
@@ -214,11 +249,25 @@
         return controls.join("");
       }
 
-      function optionHtml(value, label, type, name, disabled) {
+      function optionHtml(value, label, type, name, disabled, index = 0) {
         return `<label class="option">
-          <input type="${type}" name="${name}" value="${escapeHtml(value)}" ${disabled ? "disabled" : ""} />
+          <input type="${type}" id="${name}-${index}" name="${name}" value="${escapeHtml(value)}" ${disabled ? "disabled" : ""} />
           <span>${escapeHtml(label)}</span>
         </label>`;
+      }
+
+      function restoreAnswer(question, index) {
+        const answer = answers[index];
+        if (!answer) return;
+        const type = normalizeInputType(question.inputType);
+        if (type === "text") document.querySelector(`#answer-${index}`).value = answer.value || "";
+        const values = type === "multi_select" ? (answer.values || []) : [answer.value];
+        values.filter((value) => value !== undefined).forEach((value) => {
+          const input = [...document.querySelectorAll(`input[name="value-${index}"]`)].find((candidate) => candidate.value === String(value));
+          if (input) input.checked = true;
+        });
+        const other = document.querySelector(`#otherText-${index}`);
+        if (other) other.value = answer.otherText || "";
       }
 
       function escapeHtml(value) {
@@ -232,15 +281,39 @@
       }
 
       function answerPayload() {
-        if (isBatch()) {
+        if (questions.length > 1) {
           return {
-            answers: (spec().questions || []).map((question, index) => ({
+            answers: questions.map((question, index) => ({
               questionId: question.id || `question_${index + 1}`,
-              ...answerForQuestion(question, index),
+              ...(answers[index] || {}),
             })),
           };
         }
-        return answerForQuestion(spec(), 0);
+        return answers[0] || {};
+      }
+
+      function answerLabel(question, answer) {
+        if (!answer) return "Not answered";
+        if (normalizeInputType(question.inputType) === "text") return answer.value || "—";
+        const values = normalizeInputType(question.inputType) === "multi_select" ? (answer.values || []) : [answer.value];
+        const labels = values.map((value) => normalizedOptions(question).find((option) => option.id === String(value))?.label || (value === "true" ? "True" : value === "false" ? "False" : value));
+        if (answer.otherText) labels.push(`Other: ${answer.otherText}`);
+        return labels.join(", ") || "—";
+      }
+
+      function captureCurrent() {
+        answers[currentIndex] = answerForQuestion(questions[currentIndex], currentIndex);
+      }
+
+      async function advance() {
+        try {
+          captureCurrent();
+          if (currentIndex < questions.length - 1) currentIndex += 1;
+          else showingReview = true;
+          renderStep(false);
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : "Please complete this question.", true);
+        }
       }
 
       function answerForQuestion(question, index) {
@@ -285,10 +358,18 @@
           const result = await window.openai.callTool("loomex_human_respond", {
             requestId: humanRequest.id,
             response: answerPayload(),
+            idempotencyKey: `human-${humanRequest.id}-${Date.now()}`,
           });
           const output = result?.structuredContent || {};
           if (output.ok === false) throw new Error(output.error?.message || "Loomex rejected the answer.");
-          setStatus("Submitted. The workflow resume has been queued.");
+          form.querySelectorAll("button, input, textarea").forEach((element) => { element.disabled = true; });
+          setStatus("Submitted. Continuing the workflow…");
+          if (window.openai?.sendFollowUpMessage) {
+            await window.openai.sendFollowUpMessage({
+              prompt: "The human input request was submitted successfully. Continue the Loomex workflow using the resolved request and report its next state.",
+              scrollToBottom: true,
+            });
+          }
         } catch (error) {
           setStatus(error instanceof Error ? error.message : "Submit failed.", true);
         } finally {
