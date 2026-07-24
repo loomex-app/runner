@@ -105,7 +105,7 @@ Gatekeeper, notarization, and auto-update notes.
 Install the latest stable Loomex Codex plugin on macOS or Linux with:
 
 ```bash
-curl -fsSL https://github.com/loomex-app/runner/releases/latest/download/install-codex.sh | sh
+curl -fsSL https://github.com/loomex-app/loomex-plugin/releases/latest/download/install-codex.sh | sh
 ```
 
 The bootstrap verifies all versioned installation material with Sigstore before
