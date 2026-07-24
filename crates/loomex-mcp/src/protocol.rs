@@ -519,6 +519,8 @@ mod tests {
         assert!(html.contains("sendFollowUpMessage"));
         assert!(html.contains("requiresReview"));
         assert!(html.contains("question?.input_type"));
+        assert!(html.contains("inputType: questionType(question)"));
+        assert!(html.contains("question: questionPrompt(question, index)"));
         assert!(html.contains("updateOtherInput"));
         assert!(html.contains("form.requestSubmit"));
     }
