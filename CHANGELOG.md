@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.17 - 2026-07-24
+
+- Make Cosign downloads resumable across installer invocations.
+- Increase download tolerance for slow or unstable GitHub connections.
+
 ## 0.1.16 - 2026-07-24
 
 - Cache the checksum-verified Cosign verifier for reuse across installations.
