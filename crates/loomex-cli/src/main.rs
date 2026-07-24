@@ -6133,6 +6133,7 @@ fn create_runner_control_session<C: ManagementApiClient>(
 
 fn runner_control_manifest(resolved: &loomex_core::ResolvedCliSettings, binding_id: &str) -> Value {
     json!({
+        "surface": "plugin",
         "runnerVersion": env!("CARGO_PKG_VERSION"),
         "bindingId": binding_id,
         "workspaceRoot": resolved.workspace_path.clone().unwrap_or_default(),

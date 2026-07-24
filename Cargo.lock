@@ -1958,6 +1958,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "libc",
+ "loomex-protocol",
  "prost",
  "prost-types",
  "protoc-bin-vendored",
@@ -1981,6 +1982,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "loomex-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

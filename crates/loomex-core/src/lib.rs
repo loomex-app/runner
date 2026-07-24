@@ -27,6 +27,11 @@ pub mod service;
 pub mod stream;
 pub mod transport;
 
+pub use loomex_protocol::{
+    check_protocol_compatibility, ProtocolCompatibility, RunnerIdentity, RunnerPlatform,
+    RunnerSurface, MINIMUM_SUPPORTED_PROTOCOL_VERSION,
+};
+
 pub use approval::{
     ApprovalAuditEvent, ApprovalChannel, ApprovalDecision, ApprovalDecisionInput,
     ApprovalDecisionOutcome, ApprovalPayload, ApprovalPolicySnapshot, ApprovalPrompt,
