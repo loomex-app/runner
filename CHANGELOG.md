@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.21 - 2026-07-24
+
+- Include the required `inputType` and `question` metadata in every typed
+  human-input answer so single-question and batch submissions satisfy the v2
+  output contract.
+
 ## 0.1.20 - 2026-07-24
 
 - Normalize human-input question schemas across typed field aliases and preserve

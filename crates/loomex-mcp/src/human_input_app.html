@@ -346,6 +346,8 @@
         const payload = {
           answers: questions.map((question, index) => ({
             questionId: questionId(question, index),
+            inputType: questionType(question),
+            question: questionPrompt(question, index),
             ...(answers[index] || {}),
           })),
         };
