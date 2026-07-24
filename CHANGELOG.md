@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.15 - 2026-07-24
+
+- Show installer stages and download progress instead of appearing idle.
+- Retry interrupted downloads with resumable temporary files before failing.
+
 ## 0.1.14 - 2026-07-24
 
 - Preserve executable modes when extracting the marketplace archive under the
