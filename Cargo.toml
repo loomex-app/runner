@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/loomex-protocol",
   "crates/loomex-core",
   "crates/loomex-cli",
   "crates/loomex-mcp",
