@@ -128,6 +128,10 @@ class SourcePluginContractTest(unittest.TestCase):
                 "plugins/loomex/.codex-plugin/plugin.json",
                 json.dumps({"name": "loomex", "version": version}),
             )
+            executable = zipfile.ZipInfo("plugins/loomex/bin/darwin-arm64/loomex-mcp")
+            executable.create_system = 3
+            executable.external_attr = (stat.S_IFREG | 0o755) << 16
+            archive.writestr(executable, b"#!/bin/sh\n")
         return archive_path
 
     @staticmethod
@@ -769,6 +773,13 @@ else:
                 json.loads(marker.read_text(encoding="utf-8"))["marketplaceCommit"],
                 commit,
             )
+            installed_mcp = (
+                data_home
+                / "loomex-codex-marketplace"
+                / version
+                / "plugins/loomex/bin/darwin-arm64/loomex-mcp"
+            )
+            self.assertNotEqual(installed_mcp.stat().st_mode & stat.S_IXUSR, 0)
 
     def test_installer_exact_ref_first_install_idempotency_and_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1248,7 +1259,7 @@ else:
                     "--marketplace-installer",
                     str(temp / "loomex-install-marketplace.sh"),
                     "--version",
-                    "0.1.13",
+                    "0.1.14",
                 ],
                 text=True,
                 capture_output=True,
@@ -1270,7 +1281,7 @@ else:
             shutil.copytree(ROOT / "plugin/loomex", source)
             plugin_json = source / ".codex-plugin/plugin.json"
             plugin = json.loads(plugin_json.read_text())
-            plugin["version"] = "0.1.13+codex.local-20260723-120000"
+            plugin["version"] = "0.1.14+codex.local-20260723-120000"
             plugin_json.write_text(json.dumps(plugin))
             artifacts = temp / "artifacts"
             self.write_artifacts(artifacts)
@@ -1288,7 +1299,7 @@ else:
             self.assertEqual(result.returncode, 0, result.stderr)
             manifest = json.loads((temp / "dist/loomex/packaging/runtime-manifest.json").read_text())
             self.assertEqual(manifest["pluginVersion"], plugin["version"])
-            self.assertEqual(manifest["runtimeVersion"], "0.1.13")
+            self.assertEqual(manifest["runtimeVersion"], "0.1.14")
             self.assertEqual(validate_runtime_integrity(temp / "dist/loomex"), [])
 
 

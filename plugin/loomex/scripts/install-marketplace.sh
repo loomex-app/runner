@@ -420,6 +420,7 @@ def data_home():
 
 def safe_extract_marketplace_archive(archive_path, destination):
     with zipfile.ZipFile(archive_path) as archive:
+        modes = []
         for member in archive.infolist():
             name = member.filename
             if not name or "\x00" in name:
@@ -427,10 +428,22 @@ def safe_extract_marketplace_archive(archive_path, destination):
             target = Path(name)
             if target.is_absolute() or ".." in target.parts:
                 fail("marketplace archive contains an unsafe path")
-            mode = (member.external_attr >> 16) & 0o170000
-            if mode == stat.S_IFLNK:
+            file_type = (member.external_attr >> 16) & 0o170000
+            if file_type == stat.S_IFLNK:
                 fail("marketplace archive contains a symlink")
+            if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+                fail("marketplace archive contains an unsupported file type")
+            permissions = (member.external_attr >> 16) & 0o777
+            if permissions == 0:
+                permissions = 0o755 if member.is_dir() else 0o644
+            modes.append((name, permissions))
         archive.extractall(destination)
+        # zipfile.extractall() creates files using the process umask and does
+        # not restore Unix executable bits. Restore only ordinary permission
+        # bits after extraction so the bundled MCP and Runner binaries remain
+        # executable under the installer's intentionally restrictive umask.
+        for name, permissions in modes:
+            os.chmod(destination / name, permissions)
 
 
 def sha256_file(path):

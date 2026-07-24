@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.14 - 2026-07-24
+
+- Preserve executable modes when extracting the marketplace archive under the
+  installer's restrictive umask.
+- Add an installer regression test covering executable MCP payloads.
+
 ## 0.1.13 - 2026-07-24
 
 - Render organization, project, and workflow lists as searchable ChatGPT UI tables.
