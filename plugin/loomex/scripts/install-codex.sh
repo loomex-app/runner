@@ -20,7 +20,11 @@ fail() {
   exit 1
 }
 
-for dependency in curl codex git python3 uname mktemp chmod awk dirname rm; do
+step() {
+  echo "loomex installer: $*" >&2
+}
+
+for dependency in curl codex git python3 uname mktemp chmod awk dirname rm mv; do
   command -v "$dependency" >/dev/null 2>&1 || fail "required command not found: $dependency"
 done
 python3 - "$version" <<'PY' || fail "release asset contains an invalid embedded version"
@@ -71,11 +75,29 @@ trap cleanup 0
 trap 'exit 1' HUP INT TERM
 
 download() {
-  url=$1
-  destination=$2
-  curl --fail --location --silent --show-error \
-    --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors \
-    --output "$destination" "$url"
+  label=$1
+  url=$2
+  destination=$3
+  partial="$destination.partial"
+  rm -f -- "$partial" "$destination"
+  step "Downloading $label"
+  attempt=1
+  while :; do
+    if curl --fail --location --progress-bar \
+      --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 600 \
+      --retry 2 --retry-all-errors --continue-at - \
+      --output "$partial" "$url"; then
+      break
+    else
+      status=$?
+    fi
+    if [ "$attempt" -ge 4 ]; then
+      fail "could not download $label after $attempt attempts (curl exit $status)"
+    fi
+    step "Download of $label was interrupted; retrying (attempt $((attempt + 1))/4)"
+    attempt=$((attempt + 1))
+  done
+  mv -- "$partial" "$destination"
   test -s "$destination" && test ! -L "$destination" || fail "downloaded file is missing or unsafe: $url"
 }
 
@@ -92,25 +114,29 @@ sha256_file() {
 
 cosign_bin="$temporary/cosign"
 cosign_name="cosign-$cosign_os-$cosign_arch"
-download "https://github.com/sigstore/cosign/releases/download/v$cosign_version/$cosign_name" "$cosign_bin"
+step "Preparing secure installer for $os/$arch"
+download "Cosign verifier" "https://github.com/sigstore/cosign/releases/download/v$cosign_version/$cosign_name" "$cosign_bin"
 test "$(sha256_file "$cosign_bin")" = "$cosign_sha256" || fail "downloaded Cosign checksum did not match the pinned official release"
 chmod 700 "$cosign_bin"
+step "Verified Cosign checksum"
 
 trusted_root="$temporary/trusted_root.json"
-download "$sigstore_root_url" "$trusted_root"
+download "Sigstore trusted root" "$sigstore_root_url" "$trusted_root"
 test "$(sha256_file "$trusted_root")" = "$sigstore_root_sha256" || fail "Sigstore trusted-root checksum did not match the pinned official snapshot"
 chmod 400 "$trusted_root"
+step "Verified Sigstore trusted root"
 
 installer="loomex-install-marketplace-$version.sh"
 provenance="loomex-codex-marketplace-$version.provenance.json"
 marketplace_archive="loomex-codex-marketplace-$version.zip"
 for name in "$installer" "$installer.sigstore.json" "$provenance" "$provenance.sigstore.json" "$marketplace_archive" "$marketplace_archive.sigstore.json"; do
-  download "$base/$name" "$temporary/$name"
+  download "$name" "$base/$name" "$temporary/$name"
 done
 chmod 500 "$temporary/$installer"
 chmod 400 "$temporary/$installer.sigstore.json" "$temporary/$provenance" "$temporary/$provenance.sigstore.json" "$temporary/$marketplace_archive" "$temporary/$marketplace_archive.sigstore.json"
 
 identity="https://github.com/$repository/.github/workflows/$workflow@refs/tags/v$version"
+step "Verifying signed release assets"
 "$cosign_bin" verify-blob \
   --bundle "$temporary/$installer.sigstore.json" \
   --trusted-root "$trusted_root" \
@@ -129,17 +155,20 @@ identity="https://github.com/$repository/.github/workflows/$workflow@refs/tags/v
   --certificate-identity "$identity" \
   --certificate-oidc-issuer "$issuer" \
   "$temporary/$marketplace_archive" >/dev/null
+step "Verified release signatures and provenance"
 
 # The versioned installer performs the only Codex mutation. It snapshots the
 # previous marketplace/plugin state and restores it if any install step fails.
 (
   cd "$temporary"
+  step "Installing the verified Loomex marketplace into Codex"
   PATH="$(dirname "$cosign_bin"):$PATH" \
     LOOMEX_COSIGN_TRUSTED_ROOT="$trusted_root" \
     "./$installer" "$version" "$temporary/$marketplace_archive"
 )
 
-echo "Loomex Codex plugin $version is installed and enabled. Restart Codex or open a new task, then ask for any Loomex workflow naturally; Codex will automatically guide any required Runner setup, authentication, and workspace binding."
+step "Installation complete: Loomex Codex plugin $version is installed and enabled"
+step "Restart Codex or open a new task, then ask for any Loomex workflow naturally"
 }
 
 # Keep this invocation as the final bytes of the file. When used through
