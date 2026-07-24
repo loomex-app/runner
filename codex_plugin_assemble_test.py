@@ -529,6 +529,9 @@ else:
         self.assertIn("--progress-bar", installer)
         self.assertIn("--continue-at -", installer)
         self.assertIn("Download of $label was interrupted; retrying", installer)
+        self.assertIn("Reusing verified Cosign verifier from cache", installer)
+        self.assertIn('cosign_cache_dir="$cache_root/loomex/cosign/$cosign_version"', installer)
+        self.assertIn('test ! -L "$cosign_cached"', installer)
         self.assertIn('step "Verifying signed release assets"', installer)
         self.assertIn("cosign_version=\"3.1.2\"", installer)
         self.assertIn("sigstore_root_commit=\"a394944ec0ec1dd5e8ba50471e9ded37d88b5daa\"", installer)
@@ -1263,7 +1266,7 @@ else:
                     "--marketplace-installer",
                     str(temp / "loomex-install-marketplace.sh"),
                     "--version",
-                    "0.1.15",
+                    "0.1.16",
                 ],
                 text=True,
                 capture_output=True,
@@ -1285,7 +1288,7 @@ else:
             shutil.copytree(ROOT / "plugin/loomex", source)
             plugin_json = source / ".codex-plugin/plugin.json"
             plugin = json.loads(plugin_json.read_text())
-            plugin["version"] = "0.1.15+codex.local-20260723-120000"
+            plugin["version"] = "0.1.16+codex.local-20260723-120000"
             plugin_json.write_text(json.dumps(plugin))
             artifacts = temp / "artifacts"
             self.write_artifacts(artifacts)
@@ -1303,7 +1306,7 @@ else:
             self.assertEqual(result.returncode, 0, result.stderr)
             manifest = json.loads((temp / "dist/loomex/packaging/runtime-manifest.json").read_text())
             self.assertEqual(manifest["pluginVersion"], plugin["version"])
-            self.assertEqual(manifest["runtimeVersion"], "0.1.15")
+            self.assertEqual(manifest["runtimeVersion"], "0.1.16")
             self.assertEqual(validate_runtime_integrity(temp / "dist/loomex"), [])
 
 

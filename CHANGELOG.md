@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.16 - 2026-07-24
+
+- Cache the checksum-verified Cosign verifier for reuse across installations.
+- Redownload the verifier only when the cache is missing or invalid.
+
 ## 0.1.15 - 2026-07-24
 
 - Show installer stages and download progress instead of appearing idle.
