@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.20 - 2026-07-24
+
+- Normalize human-input question schemas across typed field aliases and preserve
+  answers by question ID across widget rerenders.
+- Show the Other text field only after Other is selected and submit single text
+  questions with Enter while reserving Shift+Enter for new lines.
+
 ## 0.1.19 - 2026-07-24
 
 - Fix typed human-input submissions to always send the backend-compatible
